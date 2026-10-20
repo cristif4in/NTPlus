@@ -74,32 +74,6 @@ HidClassPDO_GetReportDescription(
     return NULL;
 }
 
-PHIDP_REPORT_IDS
-HidClassPDO_GetReportDescriptionByReportID(
-    PHIDP_DEVICE_DESC DeviceDescription,
-    UCHAR ReportID)
-{
-    ULONG Index;
-
-    for (Index = 0; Index < DeviceDescription->ReportIDsLength; Index++)
-    {
-        if (DeviceDescription->ReportIDs[Index].ReportID == ReportID)
-        {
-            //
-            // found report id
-            //
-            return &DeviceDescription->ReportIDs[Index];
-        }
-    }
-
-    //
-    // failed to find report id
-    //
-    DPRINT1("[HIDCLASS] GetReportDescriptionByReportID ReportID %x not found\n", ReportID);
-    ASSERT(FALSE);
-    return NULL;
-}
-
 NTSTATUS
 HidClassPDO_HandleQueryDeviceId(
     IN PDEVICE_OBJECT DeviceObject,
@@ -137,7 +111,7 @@ HidClassPDO_HandleQueryDeviceId(
     //
     // allocate new buffer
     //
-    NewBuffer = ExAllocatePoolWithTag(NonPagedPool, (Length + 1) * sizeof(WCHAR), HIDCLASS_TAG);
+    NewBuffer = ExAllocatePoolWithTag(NonPagedPool, (Length + 7) * sizeof(WCHAR), HIDCLASS_TAG);
     if (!NewBuffer)
     {
         //
@@ -170,6 +144,9 @@ HidClassPDO_HandleQueryDeviceId(
         Ptr[2] = L'I';
         PDODeviceExtension->IsXInput = TRUE;
     }
+
+    if (PDODeviceExtension->Common.DeviceDescription.CollectionDescLength > 1)
+        _swprintf(NewBuffer + wcslen(NewBuffer), L"&Col%02X", PDODeviceExtension->CollectionNumber);
 
     //
     // free old buffer
@@ -650,14 +627,7 @@ HidClassPDO_PnP(
         }
         case IRP_MN_START_DEVICE:
         {
-            //
-            // Polled HID miniports are not implemented by HIDCLASS yet.
-            // Keep the PDO alive and let read dispatch fail explicitly.
-            //
-            if (PDODeviceExtension->Common.DriverExtension->DevicesArePolled)
-            {
-                DPRINT1("[HIDCLASS] PDO start: polled device detected\n");
-            }
+            PDODeviceExtension->Removed = FALSE;
 
             //
             // now register the device interface
@@ -718,6 +688,12 @@ HidClassPDO_PnP(
             }
 
             return STATUS_SUCCESS;
+        }
+        case IRP_MN_SURPRISE_REMOVAL:
+        {
+            HidClassPDO_SurpriseRemoval(PDODeviceExtension);
+            Status = STATUS_SUCCESS;
+            break;
         }
         case IRP_MN_QUERY_INTERFACE:
         {

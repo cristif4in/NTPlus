@@ -423,10 +423,6 @@ IntMsqClearWakeMask(VOID)
    Win32Thread = PsGetCurrentThreadWin32Thread();
    if (Win32Thread == NULL || Win32Thread->MessageQueue == NULL)
       return FALSE;
-   // Very hacky, but that is what they do.
-   UserDomainLockExclusive(DLT_QUEUE);
-   Win32Thread->pcti->fsWakeBits = 0;
-   UserDomainUnlockExclusive(DLT_QUEUE);
 
    IdlePong();
 
@@ -2106,7 +2102,7 @@ co_MsqPeekHardwareMessage(IN PTHREADINFO pti,
             ( Window == PWND_BOTTOM && CurrentMessage->Msg.hwnd == NULL ) || // 2
             ( Window != PWND_BOTTOM && UserHMGetHandle(Window) == CurrentMessage->Msg.hwnd ) || // 3
             ( is_mouse_message(CurrentMessage->Msg.message) ) ) && // Null window for anything mouse.
-            ( CurrentMessage->QS_Flags & QSflags ) )
+            ( QSflags & QS_INPUT ) )
       {
          idSave = MessageQueue->idSysPeek;
          MessageQueue->idSysPeek = (ULONG_PTR)CurrentMessage;
@@ -2162,7 +2158,18 @@ co_MsqPeekHardwareMessage(IN PTHREADINFO pti,
             pti->ptLast   = msg.pt;
             MessageQueue->ExtraInfo = ExtraInfo;
             if (pti->pClientInfo)
-               pti->pClientInfo->MsgSource = Source;
+            {
+               if ((msg.message >= WM_KEYFIRST && msg.message <= WM_KEYLAST) ||
+                   (msg.message >= WM_MOUSEFIRST && msg.message <= WM_MOUSELAST))
+               {
+                  pti->pClientInfo->MsgSource = Source;
+               }
+               else
+               {
+                  pti->pClientInfo->MsgSource.deviceType = IMDT_UNAVAILABLE;
+                  pti->pClientInfo->MsgSource.originId = IMO_UNAVAILABLE;
+               }
+            }
             Ret = TRUE;
             break;
          }

@@ -774,6 +774,7 @@ RegisterTargetComponents(VOID)
             DPRINT1("SetupInstallFromInfSectionW(RegistrationPhase2) failed (Error %lu)\n", GetLastError());
         }
 
+        WaitWow64Registration();
         RegisterTypeLibraries(NULL, NULL, hSysSetupInf, L"TypeLibraries");
     }
     _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
@@ -1075,8 +1076,9 @@ InstallTargetSystem(VOID)
     ReportTargetPhase(2);
     if (!InstallSysSetupInfDevices())
         return GetLastError();
-    if (!InstallSysSetupInfComponents())
+    if (!InstallSysSetupInfComponents(SPINST_ALL))
         return GetLastError();
+    StartWow64Registration();
     Error = EnableTargetPlugPlay();
     if (Error != ERROR_SUCCESS)
         return Error;

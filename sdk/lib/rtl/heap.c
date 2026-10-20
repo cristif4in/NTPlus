@@ -4195,6 +4195,12 @@ RtlGetUserInfoHeap(IN PVOID HeapHandle,
     PHEAP_ENTRY_EXTRA Extra;
     BOOLEAN HeapLocked = FALSE, InfoReturned = FALSE;
 
+    if ((ULONG_PTR)BaseAddress & (HEAP_ENTRY_SIZE - 1))
+    {
+        RtlSetLastWin32ErrorAndNtStatusFromNtStatus(STATUS_INVALID_PARAMETER);
+        return FALSE;
+    }
+
     /* Force flags */
     Flags |= Heap->ForceFlags;
 

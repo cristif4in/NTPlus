@@ -29,6 +29,8 @@
 
 #include <pseh/pseh2.h>
 
+#include <wine/plugplay.h>
+
 WINE_DEFAULT_DEBUG_CHANNEL(cfgmgr32);
 
 typedef struct _MACHINE_INFO
@@ -63,6 +65,9 @@ typedef struct _NOTIFY_DATA
 {
     ULONG ulMagic;
     PVOID hNotifyHandle;
+    LIST_ENTRY ListEntry;
+    HWND hWindow;
+    HDEVNOTIFY hHandleNotify;
 } NOTIFY_DATA, *PNOTIFY_DATA;
 
 #define NOTIFY_MAGIC 0x44556677
@@ -103,6 +108,28 @@ static CRITICAL_SECTION_DEBUG DevInstIdLockDebug =
 static CRITICAL_SECTION DevInstIdLock = { &DevInstIdLockDebug, -1, 0, 0, 0, 0 };
 static LPWSTR *DevInstIdCache;
 static ULONG DevInstIdCacheSize;
+
+static CRITICAL_SECTION HandleNotifyLock;
+static CRITICAL_SECTION_DEBUG HandleNotifyLockDebug =
+{
+    0, 0, &HandleNotifyLock,
+    { &HandleNotifyLockDebug.ProcessLocksList, &HandleNotifyLockDebug.ProcessLocksList },
+    0, 0, { (DWORD_PTR)(__FILE__ ": HandleNotifyLock") }
+};
+static CRITICAL_SECTION HandleNotifyLock = { &HandleNotifyLockDebug, -1, 0, 0, 0, 0 };
+static LIST_ENTRY HandleNotifyList = { &HandleNotifyList, &HandleNotifyList };
+static LIST_ENTRY HandleNotifyEvents = { &HandleNotifyEvents, &HandleNotifyEvents };
+static HANDLE HandleNotifySignal;
+static HANDLE HandleNotifyThread;
+
+typedef struct _HANDLE_NOTIFY_EVENT
+{
+    LIST_ENTRY ListEntry;
+    PNOTIFY_DATA pNotifyData;
+    HDEVNOTIFY hHandleNotify;
+    DWORD dwEventType;
+    DEV_BROADCAST_HDR Header;
+} HANDLE_NOTIFY_EVENT, *PHANDLE_NOTIFY_EVENT;
 
 
 /* FUNCTIONS ****************************************************************/
@@ -303,6 +330,67 @@ RpcStatusToCmStatus(
     _In_ RPC_STATUS Status)
 {
     return CR_FAILURE;
+}
+
+
+PWSTR
+CfgmgrGetPresentInterfaceList(
+    _In_ GUID *InterfaceGuid)
+{
+    RPC_BINDING_HANDLE BindingHandle = NULL;
+    PNP_RPC_BUFFER_SIZE BufferLength = 0;
+    PNP_RPC_BUFFER_SIZE AllocatedLength;
+    PWSTR List;
+    CONFIGRET ret;
+
+    if (!PnpGetLocalHandles(&BindingHandle))
+        return NULL;
+
+    RpcTryExcept
+    {
+        ret = PNP_GetInterfaceDeviceListSize(BindingHandle,
+                                             &BufferLength,
+                                             InterfaceGuid,
+                                             NULL,
+                                             CM_GET_DEVICE_INTERFACE_LIST_PRESENT);
+    }
+    RpcExcept(EXCEPTION_EXECUTE_HANDLER)
+    {
+        ret = RpcStatusToCmStatus(RpcExceptionCode());
+    }
+    RpcEndExcept;
+
+    if (ret != CR_SUCCESS || BufferLength < sizeof(WCHAR))
+        return NULL;
+
+    AllocatedLength = BufferLength + MAX_PATH * sizeof(WCHAR);
+    List = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, AllocatedLength + 2 * sizeof(WCHAR));
+    if (List == NULL)
+        return NULL;
+
+    BufferLength = AllocatedLength;
+    RpcTryExcept
+    {
+        ret = PNP_GetInterfaceDeviceList(BindingHandle,
+                                         InterfaceGuid,
+                                         NULL,
+                                         (PBYTE)List,
+                                         &BufferLength,
+                                         CM_GET_DEVICE_INTERFACE_LIST_PRESENT);
+    }
+    RpcExcept(EXCEPTION_EXECUTE_HANDLER)
+    {
+        ret = RpcStatusToCmStatus(RpcExceptionCode());
+    }
+    RpcEndExcept;
+
+    if (ret != CR_SUCCESS || BufferLength > AllocatedLength)
+    {
+        HeapFree(GetProcessHeap(), 0, List);
+        return NULL;
+    }
+
+    return List;
 }
 
 
@@ -780,6 +868,156 @@ CMP_Init_Detection(
     return ret;
 }
 
+static
+HWND
+CmpFindHandleNotifyWindow(
+    _In_ PNOTIFY_DATA pTarget,
+    _In_ HDEVNOTIFY hHandleNotify)
+{
+    PLIST_ENTRY Entry;
+
+    for (Entry = HandleNotifyList.Flink; Entry != &HandleNotifyList; Entry = Entry->Flink)
+    {
+        PNOTIFY_DATA pNotifyData = CONTAINING_RECORD(Entry, NOTIFY_DATA, ListEntry);
+
+        if (pNotifyData == pTarget && pNotifyData->hHandleNotify == hHandleNotify)
+            return pNotifyData->hWindow;
+    }
+    return NULL;
+}
+
+
+static
+DWORD
+WINAPI
+CmpHandleNotifyWorker(
+    _In_ LPVOID Parameter)
+{
+    UNREFERENCED_PARAMETER(Parameter);
+
+    for (;;)
+    {
+        PHANDLE_NOTIFY_EVENT pEvent = NULL;
+        HWND hWindow = NULL;
+
+        EnterCriticalSection(&HandleNotifyLock);
+        if (!IsListEmpty(&HandleNotifyEvents))
+        {
+            pEvent = CONTAINING_RECORD(RemoveHeadList(&HandleNotifyEvents), HANDLE_NOTIFY_EVENT, ListEntry);
+            hWindow = CmpFindHandleNotifyWindow(pEvent->pNotifyData, pEvent->hHandleNotify);
+        }
+        LeaveCriticalSection(&HandleNotifyLock);
+
+        if (pEvent == NULL)
+        {
+            WaitForSingleObject(HandleNotifySignal, INFINITE);
+            continue;
+        }
+
+        if (hWindow != NULL)
+        {
+            SendMessageTimeoutW(hWindow,
+                                WM_DEVICECHANGE,
+                                (WPARAM)pEvent->dwEventType,
+                                (LPARAM)&pEvent->Header,
+                                SMTO_ABORTIFHUNG,
+                                2000,
+                                NULL);
+        }
+        HeapFree(GetProcessHeap(), 0, pEvent);
+    }
+
+    return 0;
+}
+
+
+static
+DWORD
+CALLBACK
+CmpHandleNotifyCallback(
+    _In_ HANDLE hContext,
+    _In_ DWORD dwEventType,
+    _In_ DEV_BROADCAST_HDR *pHeader)
+{
+    PDEV_BROADCAST_HANDLE pHandle = (PDEV_BROADCAST_HANDLE)pHeader;
+    PHANDLE_NOTIFY_EVENT pEvent;
+    HDEVNOTIFY hHandleNotify = pHandle->dbch_hdevnotify;
+
+    pEvent = HeapAlloc(GetProcessHeap(), 0, FIELD_OFFSET(HANDLE_NOTIFY_EVENT, Header) + pHeader->dbch_size);
+    if (pEvent == NULL)
+        return 0;
+    pEvent->pNotifyData = (PNOTIFY_DATA)hContext;
+    pEvent->hHandleNotify = hHandleNotify;
+    pEvent->dwEventType = dwEventType;
+    CopyMemory(&pEvent->Header, pHeader, pHeader->dbch_size);
+    ((PDEV_BROADCAST_HANDLE)&pEvent->Header)->dbch_hdevnotify = (HDEVNOTIFY)hContext;
+
+    EnterCriticalSection(&HandleNotifyLock);
+    if (CmpFindHandleNotifyWindow(pEvent->pNotifyData, hHandleNotify) == NULL)
+    {
+        LeaveCriticalSection(&HandleNotifyLock);
+        HeapFree(GetProcessHeap(), 0, pEvent);
+        return 0;
+    }
+    InsertTailList(&HandleNotifyEvents, &pEvent->ListEntry);
+    LeaveCriticalSection(&HandleNotifyLock);
+    SetEvent(HandleNotifySignal);
+    return 0;
+}
+
+
+static
+CONFIGRET
+CmpRegisterHandleNotification(
+    _In_ HWND hWindow,
+    _In_ PDEV_BROADCAST_HANDLE pFilter,
+    _In_ ULONG ulFlags,
+    _Inout_ PNOTIFY_DATA pNotifyData)
+{
+    HDEVNOTIFY hHandleNotify;
+
+    if (pFilter->dbch_size < sizeof(DEV_BROADCAST_HANDLE))
+        return CR_INVALID_DATA;
+
+    if (ulFlags & DEVICE_NOTIFY_ALL_INTERFACE_CLASSES)
+        return CR_INVALID_FLAG;
+
+    EnterCriticalSection(&HandleNotifyLock);
+    if (HandleNotifyThread == NULL)
+    {
+        if (HandleNotifySignal == NULL)
+            HandleNotifySignal = CreateEventW(NULL, FALSE, FALSE, NULL);
+        if (HandleNotifySignal != NULL)
+            HandleNotifyThread = CreateThread(NULL, 0, CmpHandleNotifyWorker, NULL, 0, NULL);
+    }
+    LeaveCriticalSection(&HandleNotifyLock);
+    if (HandleNotifyThread == NULL)
+        return CR_OUT_OF_MEMORY;
+
+    hHandleNotify = I_ScRegisterDeviceNotification(pNotifyData,
+                                                   (DEV_BROADCAST_HDR *)pFilter,
+                                                   CmpHandleNotifyCallback);
+    if (hHandleNotify == NULL)
+    {
+        switch (GetLastError())
+        {
+            case ERROR_NOT_ENOUGH_MEMORY:
+                return CR_OUT_OF_MEMORY;
+            case ERROR_INVALID_PARAMETER:
+                return CR_INVALID_DATA;
+            default:
+                return CR_FAILURE;
+        }
+    }
+
+    EnterCriticalSection(&HandleNotifyLock);
+    pNotifyData->hWindow = hWindow;
+    pNotifyData->hHandleNotify = hHandleNotify;
+    InsertTailList(&HandleNotifyList, &pNotifyData->ListEntry);
+    LeaveCriticalSection(&HandleNotifyLock);
+    return CR_SUCCESS;
+}
+
 
 /***********************************************************************
  * CMP_RegisterNotification [SETUPAPI.@]
@@ -825,6 +1063,24 @@ CMP_RegisterNotification(
 
     pNotifyData->ulMagic = NOTIFY_MAGIC;
     pNotifyData->hNotifyHandle = NULL;
+
+    if (((PDEV_BROADCAST_HDR)lpvNotificationFilter)->dbch_devicetype == DBT_DEVTYP_HANDLE &&
+        (ulFlags & DEVICE_NOTIFY_SERVICE_HANDLE) == DEVICE_NOTIFY_WINDOW_HANDLE)
+    {
+        ret = CmpRegisterHandleNotification((HWND)hRecipient,
+                                            (PDEV_BROADCAST_HANDLE)lpvNotificationFilter,
+                                            ulFlags,
+                                            pNotifyData);
+        if (ret != CR_SUCCESS)
+        {
+            HeapFree(GetProcessHeap(), 0, pNotifyData);
+            *phDevNotify = (HDEVNOTIFY)NULL;
+            return ret;
+        }
+
+        *phDevNotify = (HDEVNOTIFY)pNotifyData;
+        return CR_SUCCESS;
+    }
 
     ZeroMemory(szNameBuffer, sizeof(szNameBuffer));
 
@@ -959,6 +1215,17 @@ CMP_UnregisterNotification(
     if ((pNotifyData == NULL) ||
         (pNotifyData->ulMagic != NOTIFY_MAGIC))
         return CR_INVALID_POINTER;
+
+    if (pNotifyData->hHandleNotify != NULL)
+    {
+        EnterCriticalSection(&HandleNotifyLock);
+        RemoveEntryList(&pNotifyData->ListEntry);
+        LeaveCriticalSection(&HandleNotifyLock);
+        I_ScUnregisterDeviceNotification(pNotifyData->hHandleNotify);
+        pNotifyData->ulMagic = 0;
+        HeapFree(GetProcessHeap(), 0, pNotifyData);
+        return CR_SUCCESS;
+    }
 
     if (!PnpGetLocalHandles(&BindingHandle))
         return CR_FAILURE;

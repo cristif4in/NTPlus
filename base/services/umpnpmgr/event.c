@@ -61,9 +61,17 @@ typedef struct _DEVICE_EVENT_CONTEXT
     PDEV_BROADCAST_DEVICEINTERFACE_W EventData;
 } DEVICE_EVENT_CONTEXT, *PDEVICE_EVENT_CONTEXT;
 
+typedef struct _PDO_NAME_ENTRY
+{
+    LIST_ENTRY ListEntry;
+    PWSTR PdoName;
+    WCHAR DeviceInstance[ANYSIZE_ARRAY];
+} PDO_NAME_ENTRY, *PPDO_NAME_ENTRY;
+
 static CRITICAL_SECTION DeviceEventQueueLock;
 static LIST_ENTRY DeviceEventQueueHead;
 static HANDLE DeviceEventQueueEvent;
+static LIST_ENTRY PdoNameListHead = { &PdoNameListHead, &PdoNameListHead };
 
 /* FUNCTIONS *****************************************************************/
 
@@ -221,6 +229,109 @@ BroadcastDeviceNodesChanged(VOID)
 
 
 static
+BOOL
+GetPhysicalDeviceObjectName(
+    _In_ PCWSTR DeviceInstance,
+    _Out_writes_bytes_(BufferSize) PWSTR Buffer,
+    _In_ ULONG BufferSize)
+{
+    PLUGPLAY_CONTROL_PROPERTY_DATA PlugPlayData;
+
+    RtlInitUnicodeString(&PlugPlayData.DeviceInstance, DeviceInstance);
+    PlugPlayData.Property = PNP_PROPERTY_PHYSICAL_DEVICE_OBJECT_NAME;
+    PlugPlayData.Buffer = Buffer;
+    PlugPlayData.BufferSize = BufferSize - sizeof(WCHAR);
+    return NT_SUCCESS(NtPlugPlayControl(PlugPlayControlProperty, &PlugPlayData, sizeof(PlugPlayData)));
+}
+
+
+static
+PPDO_NAME_ENTRY
+FindPdoName(
+    _In_ PCWSTR DeviceInstance)
+{
+    PLIST_ENTRY Current;
+
+    for (Current = PdoNameListHead.Flink; Current != &PdoNameListHead; Current = Current->Flink)
+    {
+        PPDO_NAME_ENTRY Entry = CONTAINING_RECORD(Current, PDO_NAME_ENTRY, ListEntry);
+
+        if (!_wcsicmp(Entry->DeviceInstance, DeviceInstance))
+            return Entry;
+    }
+    return NULL;
+}
+
+
+static
+VOID
+ForgetPdoName(
+    _In_ PPDO_NAME_ENTRY Entry)
+{
+    RemoveEntryList(&Entry->ListEntry);
+    HeapFree(GetProcessHeap(), 0, Entry);
+}
+
+
+static
+VOID
+RememberPdoName(
+    _In_ PCWSTR DeviceInstance)
+{
+    WCHAR PdoName[MAX_PATH] = {0};
+    PPDO_NAME_ENTRY Entry;
+    SIZE_T InstanceSize, NameSize;
+
+    Entry = FindPdoName(DeviceInstance);
+    if (Entry != NULL)
+        ForgetPdoName(Entry);
+
+    if (!GetPhysicalDeviceObjectName(DeviceInstance, PdoName, sizeof(PdoName)) ||
+        PdoName[0] == UNICODE_NULL)
+    {
+        return;
+    }
+
+    InstanceSize = (wcslen(DeviceInstance) + 1) * sizeof(WCHAR);
+    NameSize = (wcslen(PdoName) + 1) * sizeof(WCHAR);
+    Entry = HeapAlloc(GetProcessHeap(), 0, FIELD_OFFSET(PDO_NAME_ENTRY, DeviceInstance) + InstanceSize + NameSize);
+    if (Entry == NULL)
+        return;
+    CopyMemory(Entry->DeviceInstance, DeviceInstance, InstanceSize);
+    Entry->PdoName = (PWSTR)((PUCHAR)Entry->DeviceInstance + InstanceSize);
+    CopyMemory(Entry->PdoName, PdoName, NameSize);
+    InsertTailList(&PdoNameListHead, &Entry->ListEntry);
+}
+
+
+static
+VOID
+BroadcastTargetRemoveComplete(
+    _In_ PCWSTR DeviceInstance)
+{
+    PPDO_NAME_ENTRY Entry;
+    PDEV_BROADCAST_HANDLE pEventData;
+    DWORD dwSize;
+
+    Entry = FindPdoName(DeviceInstance);
+    if (Entry == NULL)
+        return;
+
+    dwSize = FIELD_OFFSET(DEV_BROADCAST_HANDLE, dbch_data) + 2 * sizeof(WCHAR);
+    pEventData = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, dwSize);
+    if (pEventData != NULL)
+    {
+        pEventData->dbch_size = dwSize;
+        pEventData->dbch_devicetype = DBT_DEVTYP_HANDLE;
+        pEventData->dbch_nameoffset = -1;
+        BroadcastListenerEvent(DBT_DEVICEREMOVECOMPLETE, Entry->PdoName, (PBYTE)pEventData, dwSize);
+        HeapFree(GetProcessHeap(), 0, pEventData);
+    }
+    ForgetPdoName(Entry);
+}
+
+
+static
 VOID
 ProcessTargetDeviceEvent(
     _In_ PPLUGPLAY_EVENT_BLOCK PnpEvent)
@@ -232,6 +343,7 @@ ProcessTargetDeviceEvent(
     if (UuidEqual(&PnpEvent->EventGuid, (UUID*)&GUID_DEVICE_ARRIVAL, &RpcStatus))
     {
         DPRINT("Device arrival: %S\n", PnpEvent->TargetDevice.DeviceIds);
+        RememberPdoName(PnpEvent->TargetDevice.DeviceIds);
         BroadcastDeviceNodesChanged();
     }
     else if (UuidEqual(&PnpEvent->EventGuid, (UUID*)&GUID_DEVICE_EJECT_VETOED, &RpcStatus))
@@ -250,6 +362,7 @@ ProcessTargetDeviceEvent(
     else if (UuidEqual(&PnpEvent->EventGuid, (UUID*)&GUID_DEVICE_SURPRISE_REMOVAL, &RpcStatus))
     {
         DPRINT1("Surprise removal: %S\n", PnpEvent->TargetDevice.DeviceIds);
+        BroadcastTargetRemoveComplete(PnpEvent->TargetDevice.DeviceIds);
         BroadcastDeviceNodesChanged();
     }
     else if (UuidEqual(&PnpEvent->EventGuid, (UUID*)&GUID_DEVICE_REMOVAL_VETOED, &RpcStatus))
@@ -268,6 +381,18 @@ ProcessTargetDeviceEvent(
                 PnpEvent->EventGuid.Data4[3], PnpEvent->EventGuid.Data4[4], PnpEvent->EventGuid.Data4[5],
                 PnpEvent->EventGuid.Data4[6], PnpEvent->EventGuid.Data4[7]);
     }
+}
+
+
+static
+VOID
+CopyInterfaceName(
+    _Out_ PWSTR Destination,
+    _In_ PCWSTR SymbolicLinkName)
+{
+    wcscpy(Destination, SymbolicLinkName);
+    if (!wcsncmp(Destination, L"\\??\\", 4))
+        Destination[1] = L'\\';
 }
 
 
@@ -323,7 +448,7 @@ ProcessDeviceClassChangeEvent(
                 pEventData->dbcc_size = dwSize;
                 pEventData->dbcc_devicetype = DBT_DEVTYP_DEVICEINTERFACE;
                 CopyMemory(&pEventData->dbcc_classguid, &PnpEvent->DeviceClass.ClassGuid, sizeof(GUID));
-                wcscpy(pEventData->dbcc_name, PnpEvent->DeviceClass.SymbolicLinkName);
+                CopyInterfaceName(pEventData->dbcc_name, PnpEvent->DeviceClass.SymbolicLinkName);
             }
 
             if (pEventData == NULL)
@@ -378,7 +503,7 @@ ProcessDeviceClassChangeEvent(
     pEventData->dbcc_size = dwSize;
     pEventData->dbcc_devicetype = DBT_DEVTYP_DEVICEINTERFACE;
     CopyMemory(&pEventData->dbcc_classguid, &PnpEvent->DeviceClass.ClassGuid, sizeof(GUID));
-    wcscpy(pEventData->dbcc_name, PnpEvent->DeviceClass.SymbolicLinkName);
+    CopyInterfaceName(pEventData->dbcc_name, PnpEvent->DeviceClass.SymbolicLinkName);
     BroadcastListenerEvent(dwEventType, PnpEvent->DeviceClass.SymbolicLinkName, (PBYTE)pEventData, dwSize);
     HeapFree(GetProcessHeap(), 0, pEventData);
 }
@@ -391,7 +516,6 @@ ProcessCustomDeviceEvent(
 {
     PTARGET_DEVICE_CUSTOM_NOTIFICATION Notification = PnpEvent->CustomNotification.NotificationStructure;
     PUCHAR EventEnd = (PUCHAR)PnpEvent + PnpEvent->TotalSize;
-    PLUGPLAY_CONTROL_PROPERTY_DATA PlugPlayData;
     WCHAR PdoName[MAX_PATH] = {0};
     PDEV_BROADCAST_HANDLE pEventData;
     ULONG DataSize, dwSize;
@@ -410,11 +534,7 @@ ProcessCustomDeviceEvent(
     if (NameOffset < 0 || (ULONG)NameOffset >= DataSize)
         NameOffset = -1;
 
-    RtlInitUnicodeString(&PlugPlayData.DeviceInstance, PnpEvent->CustomNotification.DeviceIds);
-    PlugPlayData.Property = PNP_PROPERTY_PHYSICAL_DEVICE_OBJECT_NAME;
-    PlugPlayData.Buffer = PdoName;
-    PlugPlayData.BufferSize = sizeof(PdoName) - sizeof(WCHAR);
-    if (!NT_SUCCESS(NtPlugPlayControl(PlugPlayControlProperty, &PlugPlayData, sizeof(PlugPlayData))))
+    if (!GetPhysicalDeviceObjectName(PnpEvent->CustomNotification.DeviceIds, PdoName, sizeof(PdoName)))
         return;
 
     dwSize = FIELD_OFFSET(DEV_BROADCAST_HANDLE, dbch_data) + DataSize + 2 * sizeof(WCHAR);

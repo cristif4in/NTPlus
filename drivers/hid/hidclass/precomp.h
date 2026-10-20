@@ -7,7 +7,6 @@
 #include <stdio.h>
 #include <hidport.h>
 #include <pseh/pseh2.h>
-#include <reactos/hidp_private.h>
 
 #define HIDCLASS_TAG 'CdiH'
 
@@ -91,6 +90,8 @@ typedef struct
     BOOLEAN ReadStopped;
     KEVENT ReadIdleEvent;
     KDPC ReadDpc;
+    KTIMER PollTimer;
+    ULONG PollInterval;
 
     KSPIN_LOCK WakeLock;
     volatile LONG WakeState;
@@ -135,6 +136,8 @@ typedef struct
 
     PIRP WaitWakeIrp;
 
+    BOOLEAN Removed;
+
 } HIDCLASS_PDO_DEVICE_EXTENSION, *PHIDCLASS_PDO_DEVICE_EXTENSION;
 
 #define HIDCLASS_WAKE_IDLE       0
@@ -150,7 +153,12 @@ HidClassPDO_CompleteWake(
     IN PHIDCLASS_PDO_DEVICE_EXTENSION PDODeviceExtension,
     IN NTSTATUS Status);
 
+#define HIDCLASS_DEFAULT_POLL_INTERVAL 5
+#define HIDCLASS_MAX_POLL_INTERVAL 10000
+
 #define HIDCLASS_QUEUED_REPORTS 32
+#define HIDCLASS_MIN_QUEUED_REPORTS 2
+#define HIDCLASS_MAX_QUEUED_REPORTS 512
 
 typedef struct __HIDCLASS_FILEOP_CONTEXT__
 {
@@ -170,6 +178,7 @@ typedef struct __HIDCLASS_FILEOP_CONTEXT__
     ULONG ReportSlotLength;
     ULONG ReportQueueHead;
     ULONG ReportQueueCount;
+    ULONG ReportQueueCapacity;
 
     //
     // stop in progress indicator
@@ -207,6 +216,14 @@ HidClassFDO_StopRead(
     IN PDEVICE_OBJECT FDODeviceObject,
     IN BOOLEAN Wait);
 
+VOID
+HidClassPDO_SurpriseRemoval(
+    IN PHIDCLASS_PDO_DEVICE_EXTENSION PDODeviceExtension);
+
+VOID
+HidClassFDO_KickRead(
+    IN PDEVICE_OBJECT FDODeviceObject);
+
 /* pdo.c */
 NTSTATUS
 HidClassPDO_CreatePDO(
@@ -227,10 +244,5 @@ PHIDP_REPORT_IDS
 HidClassPDO_GetReportDescription(
     PHIDP_DEVICE_DESC DeviceDescription,
     ULONG CollectionNumber);
-
-PHIDP_REPORT_IDS
-HidClassPDO_GetReportDescriptionByReportID(
-    PHIDP_DEVICE_DESC DeviceDescription,
-    UCHAR ReportID);
 
 #endif /* _HIDCLASS_PCH_ */

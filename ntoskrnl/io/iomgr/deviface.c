@@ -29,6 +29,129 @@ IopGetDeviceObjectFromDeviceInstance(PUNICODE_STRING DeviceInstance);
 
 static PCWSTR BaseKeyString = L"\\Registry\\Machine\\System\\CurrentControlSet\\Control\\DeviceClasses\\";
 
+typedef struct _IOP_ENABLED_INTERFACE
+{
+    LIST_ENTRY ListEntry;
+    UNICODE_STRING Name;
+} IOP_ENABLED_INTERFACE, *PIOP_ENABLED_INTERFACE;
+
+static LIST_ENTRY IopEnabledInterfaces = { &IopEnabledInterfaces, &IopEnabledInterfaces };
+static EX_PUSH_LOCK IopEnabledInterfacesLock;
+
+static
+PIOP_ENABLED_INTERFACE
+IopFindEnabledInterface(
+    _In_ PCUNICODE_STRING Name,
+    _Out_opt_ PULONG Rank)
+{
+    PLIST_ENTRY Entry;
+    ULONG Index = 0;
+
+    for (Entry = IopEnabledInterfaces.Flink; Entry != &IopEnabledInterfaces; Entry = Entry->Flink, Index++)
+    {
+        PIOP_ENABLED_INTERFACE Interface = CONTAINING_RECORD(Entry, IOP_ENABLED_INTERFACE, ListEntry);
+
+        if (RtlEqualUnicodeString(&Interface->Name, Name, TRUE))
+        {
+            if (Rank)
+                *Rank = Index;
+            return Interface;
+        }
+    }
+    return NULL;
+}
+
+static
+VOID
+IopTrackEnabledInterface(
+    _In_ PCUNICODE_STRING SymbolicLinkName)
+{
+    PIOP_ENABLED_INTERFACE Interface;
+    UNICODE_STRING Name;
+
+    Name.Buffer = SymbolicLinkName->Buffer + 4;
+    Name.Length = Name.MaximumLength = SymbolicLinkName->Length - 4 * sizeof(WCHAR);
+
+    KeEnterCriticalRegion();
+    ExAcquirePushLockExclusive(&IopEnabledInterfacesLock);
+    Interface = IopFindEnabledInterface(&Name, NULL);
+    if (!Interface)
+    {
+        Interface = ExAllocatePoolWithTag(PagedPool, sizeof(*Interface) + Name.Length, TAG_IO);
+        if (Interface)
+        {
+            Interface->Name.Buffer = (PWCHAR)(Interface + 1);
+            Interface->Name.Length = Interface->Name.MaximumLength = Name.Length;
+            RtlCopyMemory(Interface->Name.Buffer, Name.Buffer, Name.Length);
+            InsertTailList(&IopEnabledInterfaces, &Interface->ListEntry);
+        }
+    }
+    ExReleasePushLockExclusive(&IopEnabledInterfacesLock);
+    KeLeaveCriticalRegion();
+}
+
+static
+VOID
+IopOrderEnabledInterfaces(
+    _Inout_ PWSTR List)
+{
+    PWSTR *Entries, Copy, Entry, Out;
+    PULONG Ranks;
+    ULONG Count = 0, Index, Sorted;
+    SIZE_T Size;
+
+    for (Entry = List; *Entry; Entry += wcslen(Entry) + 1)
+        Count++;
+    if (Count < 2)
+        return;
+
+    Size = (SIZE_T)(Entry - List + 1) * sizeof(WCHAR);
+    Entries = ExAllocatePoolWithTag(PagedPool, Count * (sizeof(PWSTR) + sizeof(ULONG)) + Size, TAG_IO);
+    if (!Entries)
+        return;
+    Ranks = (PULONG)(Entries + Count);
+    Copy = (PWSTR)(Ranks + Count);
+    RtlCopyMemory(Copy, List, Size);
+
+    KeEnterCriticalRegion();
+    ExAcquirePushLockShared(&IopEnabledInterfacesLock);
+    for (Entry = Copy, Index = 0; *Entry; Entry += wcslen(Entry) + 1, Index++)
+    {
+        UNICODE_STRING Name;
+
+        RtlInitUnicodeString(&Name, Entry + 4);
+        Entries[Index] = Entry;
+        if (wcslen(Entry) <= 4 || !IopFindEnabledInterface(&Name, &Ranks[Index]))
+            Ranks[Index] = MAXULONG;
+    }
+    ExReleasePushLockShared(&IopEnabledInterfacesLock);
+    KeLeaveCriticalRegion();
+
+    for (Sorted = 1; Sorted < Count; Sorted++)
+    {
+        PWSTR CurrentEntry = Entries[Sorted];
+        ULONG CurrentRank = Ranks[Sorted];
+
+        for (Index = Sorted; Index > 0 && Ranks[Index - 1] > CurrentRank; Index--)
+        {
+            Entries[Index] = Entries[Index - 1];
+            Ranks[Index] = Ranks[Index - 1];
+        }
+        Entries[Index] = CurrentEntry;
+        Ranks[Index] = CurrentRank;
+    }
+
+    for (Index = 0, Out = List; Index < Count; Index++)
+    {
+        SIZE_T Length = wcslen(Entries[Index]) + 1;
+
+        RtlCopyMemory(Out, Entries[Index], Length * sizeof(WCHAR));
+        Out += Length;
+    }
+    *Out = UNICODE_NULL;
+    ExFreePoolWithTag(Entries, TAG_IO);
+}
+
 /**
  * @brief
  * Creates a new symbolic link from the specified format of the prefix, device string,
@@ -457,6 +580,32 @@ Quit:
  * Retrieves a handles to the GUID, device and instance registry keys
  * for the specified symbolic link.
  **/
+static
+BOOLEAN
+IopIsDeviceInterfaceLinked(
+    _In_ HANDLE ControlKey)
+{
+    union
+    {
+        KEY_VALUE_PARTIAL_INFORMATION Info;
+        UCHAR Buffer[FIELD_OFFSET(KEY_VALUE_PARTIAL_INFORMATION, Data) + sizeof(ULONG)];
+    } Linked;
+    UNICODE_STRING ValueName = RTL_CONSTANT_STRING(L"Linked");
+    ULONG ResultLength;
+    NTSTATUS Status;
+
+    Status = ZwQueryValueKey(ControlKey,
+                             &ValueName,
+                             KeyValuePartialInformation,
+                             &Linked,
+                             sizeof(Linked),
+                             &ResultLength);
+    return NT_SUCCESS(Status) &&
+           Linked.Info.Type == REG_DWORD &&
+           Linked.Info.DataLength == sizeof(ULONG) &&
+           *(PULONG)Linked.Info.Data != 0;
+}
+
 static
 NTSTATUS
 OpenRegistryHandlesFromSymbolicLink(
@@ -1384,6 +1533,8 @@ TerminateList:
         ReturnBuffer.Buffer = NewBuffer;
     }
     ReturnBuffer.Buffer[ReturnBuffer.Length / sizeof(WCHAR)] = UNICODE_NULL;
+    if (!(Flags & DEVICE_INTERFACE_INCLUDE_NONACTIVE))
+        IopOrderEnabledInterfaces(ReturnBuffer.Buffer);
     *SymbolicLinkList = ReturnBuffer.Buffer;
     Status = STATUS_SUCCESS;
 
@@ -1461,6 +1612,8 @@ IoRegisterDeviceInterface(IN PDEVICE_OBJECT PhysicalDeviceObject,
     OBJECT_ATTRIBUTES ObjectAttributes;
     ULONG i;
     NTSTATUS Status, SymLinkStatus;
+    ULONG Disposition;
+    BOOLEAN AlreadyLinked = FALSE;
     PEXTENDED_DEVOBJ_EXTENSION DeviceObjectExtension;
 
     ASSERT_IRQL_EQUAL(PASSIVE_LEVEL);
@@ -1675,7 +1828,7 @@ IoRegisterDeviceInterface(IN PDEVICE_OBJECT PhysicalDeviceObject,
         0, /* TileIndex */
         NULL, /* Class */
         REG_OPTION_NON_VOLATILE,
-        NULL); /* Disposition */
+        &Disposition);
 
     if (!NT_SUCCESS(Status))
     {
@@ -1685,6 +1838,18 @@ IoRegisterDeviceInterface(IN PDEVICE_OBJECT PhysicalDeviceObject,
         ExFreePool(InterfaceKeyName.Buffer);
         ExFreePool(BaseKeyName.Buffer);
         return Status;
+    }
+
+    if (Disposition == REG_OPENED_EXISTING_KEY)
+    {
+        UNICODE_STRING ControlName = RTL_CONSTANT_STRING(L"Control");
+        HANDLE ControlKey;
+
+        if (NT_SUCCESS(IopOpenRegistryKeyEx(&ControlKey, SubKey, &ControlName, KEY_QUERY_VALUE)))
+        {
+            AlreadyLinked = IopIsDeviceInterfaceLinked(ControlKey);
+            ZwClose(ControlKey);
+        }
     }
 
     /* Create symbolic link name: \??\ACPI#PNP0501#1#{GUID}\ReferenceString */
@@ -1727,13 +1892,12 @@ IoRegisterDeviceInterface(IN PDEVICE_OBJECT PhysicalDeviceObject,
     DPRINT("IoRegisterDeviceInterface(): creating symbolic link %wZ -> %wZ\n", SymbolicLinkName, &PdoNameInfo->Name);
     SymLinkStatus = IoCreateSymbolicLink(SymbolicLinkName, &PdoNameInfo->Name);
 
-    /* If the symbolic link already exists, return an informational success status */
     if (SymLinkStatus == STATUS_OBJECT_NAME_COLLISION)
     {
         /* HACK: Delete the existing symbolic link and update it to the new PDO name */
         IoDeleteSymbolicLink(SymbolicLinkName);
         IoCreateSymbolicLink(SymbolicLinkName, &PdoNameInfo->Name);
-        SymLinkStatus = STATUS_OBJECT_NAME_EXISTS;
+        SymLinkStatus = STATUS_SUCCESS;
     }
 
     if (!NT_SUCCESS(SymLinkStatus))
@@ -1782,7 +1946,9 @@ IoRegisterDeviceInterface(IN PDEVICE_OBJECT PhysicalDeviceObject,
     ExFreePool(InterfaceKeyName.Buffer);
     ExFreePool(BaseKeyName.Buffer);
 
-    return NT_SUCCESS(Status) ? SymLinkStatus : Status;
+    if (NT_SUCCESS(Status) && AlreadyLinked)
+        return STATUS_OBJECT_NAME_EXISTS;
+    return Status;
 }
 
 /*++
@@ -1818,6 +1984,7 @@ IoSetDeviceInterfaceState(IN PUNICODE_STRING SymbolicLinkName,
     UNICODE_STRING KeyName, DeviceInstance;
     OBJECT_ATTRIBUTES ObjectAttributes;
     ULONG LinkedValue, Index;
+    BOOLEAN CurrentlyLinked;
     GUID DeviceGuid;
     UNICODE_STRING DosDevicesPrefix1 = RTL_CONSTANT_STRING(L"\\??\\");
     UNICODE_STRING DosDevicesPrefix2 = RTL_CONSTANT_STRING(L"\\\\?\\");
@@ -1892,7 +2059,7 @@ IoSetDeviceInterfaceState(IN PUNICODE_STRING SymbolicLinkName,
                                InstanceHandle,
                                NULL);
     Status = ZwCreateKey(&ControlHandle,
-                         KEY_SET_VALUE,
+                         KEY_SET_VALUE | KEY_QUERY_VALUE,
                          &ObjectAttributes,
                          0,
                          NULL,
@@ -1903,6 +2070,18 @@ IoSetDeviceInterfaceState(IN PUNICODE_STRING SymbolicLinkName,
     {
         DPRINT1("Failed to create the Control subkey\n");
         return Status;
+    }
+
+    CurrentlyLinked = IopIsDeviceInterfaceLinked(ControlHandle);
+    if (Enable && CurrentlyLinked)
+    {
+        ZwClose(ControlHandle);
+        return STATUS_OBJECT_NAME_EXISTS;
+    }
+    if (!Enable && !CurrentlyLinked)
+    {
+        ZwClose(ControlHandle);
+        return STATUS_OBJECT_NAME_NOT_FOUND;
     }
 
     LinkedValue = (Enable ? 1 : 0);
@@ -1920,6 +2099,8 @@ IoSetDeviceInterfaceState(IN PUNICODE_STRING SymbolicLinkName,
         DPRINT1("Failed to write the Linked value\n");
         return Status;
     }
+    if (Enable)
+        IopTrackEnabledInterface(SymbolicLinkName);
 
     ASSERT(GuidString.Buffer >= LinkNameNoPrefix.Buffer + 1);
     DeviceInstance.Length = (USHORT)((GuidString.Buffer - LinkNameNoPrefix.Buffer - 1) * sizeof(WCHAR));
@@ -1970,6 +2151,112 @@ IoSetDeviceInterfaceState(IN PUNICODE_STRING SymbolicLinkName,
         ObDereferenceObject(PhysicalDeviceObject);
     DPRINT("Status %x\n", Status);
     return STATUS_SUCCESS;
+}
+
+VOID
+IopDisableDeviceInterfaces(
+    _In_ PDEVICE_NODE DeviceNode)
+{
+    const ULONG InfoSize = FIELD_OFFSET(KEY_BASIC_INFORMATION, Name) + 256 * sizeof(WCHAR);
+    PKEY_BASIC_INFORMATION ClassInfo, ReferenceInfo;
+    PKEY_VALUE_FULL_INFORMATION LinkInfo;
+    UNICODE_STRING BaseKeyU, KeyName, Link;
+    HANDLE ClassesKey, InterfaceKey, ReferenceKey;
+    ULONG ClassIndex, ReferenceIndex, Size, Index;
+    NTSTATUS Status;
+
+    PAGED_CODE();
+
+    if (DeviceNode->InstancePath.Length == 0)
+        return;
+
+    RtlInitUnicodeString(&BaseKeyU, BaseKeyString);
+    Status = IopOpenRegistryKeyEx(&ClassesKey, NULL, &BaseKeyU, KEY_ENUMERATE_SUB_KEYS);
+    if (!NT_SUCCESS(Status))
+        return;
+
+    ClassInfo = ExAllocatePoolWithTag(PagedPool, 2 * InfoSize, TAG_IO);
+    KeyName.MaximumLength = (USHORT)(2 * GUID_STRING_BYTES + DeviceNode->InstancePath.Length + 6 * sizeof(WCHAR));
+    KeyName.Buffer = ExAllocatePoolWithTag(PagedPool, KeyName.MaximumLength, TAG_IO);
+    if (ClassInfo == NULL || KeyName.Buffer == NULL)
+    {
+        if (ClassInfo)
+            ExFreePoolWithTag(ClassInfo, TAG_IO);
+        if (KeyName.Buffer)
+            ExFreePoolWithTag(KeyName.Buffer, TAG_IO);
+        ZwClose(ClassesKey);
+        return;
+    }
+    ReferenceInfo = (PKEY_BASIC_INFORMATION)((PUCHAR)ClassInfo + InfoSize);
+
+    for (ClassIndex = 0; ; ClassIndex++)
+    {
+        UNICODE_STRING ClassName;
+
+        Status = ZwEnumerateKey(ClassesKey, ClassIndex, KeyBasicInformation, ClassInfo, InfoSize, &Size);
+        if (Status == STATUS_NO_MORE_ENTRIES)
+            break;
+        if (!NT_SUCCESS(Status) || ClassInfo->NameLength != GUID_STRING_BYTES)
+            continue;
+        ClassName.Buffer = ClassInfo->Name;
+        ClassName.Length = ClassName.MaximumLength = (USHORT)ClassInfo->NameLength;
+
+        KeyName.Length = 0;
+        RtlAppendUnicodeStringToString(&KeyName, &ClassName);
+        RtlAppendUnicodeToString(&KeyName, L"\\##?#");
+        Index = KeyName.Length / sizeof(WCHAR);
+        RtlAppendUnicodeStringToString(&KeyName, &DeviceNode->InstancePath);
+        for (; Index < KeyName.Length / sizeof(WCHAR); Index++)
+        {
+            if (KeyName.Buffer[Index] == L'\\')
+                KeyName.Buffer[Index] = L'#';
+        }
+        RtlAppendUnicodeToString(&KeyName, L"#");
+        RtlAppendUnicodeStringToString(&KeyName, &ClassName);
+
+        Status = IopOpenRegistryKeyEx(&InterfaceKey, ClassesKey, &KeyName, KEY_ENUMERATE_SUB_KEYS);
+        if (!NT_SUCCESS(Status))
+            continue;
+
+        for (ReferenceIndex = 0; ; ReferenceIndex++)
+        {
+            UNICODE_STRING ReferenceName;
+
+            Status = ZwEnumerateKey(InterfaceKey, ReferenceIndex, KeyBasicInformation, ReferenceInfo, InfoSize, &Size);
+            if (Status == STATUS_NO_MORE_ENTRIES)
+                break;
+            if (!NT_SUCCESS(Status))
+                continue;
+
+            ReferenceName.Buffer = ReferenceInfo->Name;
+            ReferenceName.Length = ReferenceName.MaximumLength = (USHORT)ReferenceInfo->NameLength;
+            Status = IopOpenRegistryKeyEx(&ReferenceKey, InterfaceKey, &ReferenceName, KEY_QUERY_VALUE);
+            if (!NT_SUCCESS(Status))
+                continue;
+
+            Status = IopGetRegistryValue(ReferenceKey, L"SymbolicLink", &LinkInfo);
+            ZwClose(ReferenceKey);
+            if (!NT_SUCCESS(Status))
+                continue;
+
+            if (LinkInfo->Type == REG_SZ && LinkInfo->DataLength >= sizeof(WCHAR) && LinkInfo->DataLength <= MAXUSHORT)
+            {
+                Link.Buffer = (PWCHAR)((PUCHAR)LinkInfo + LinkInfo->DataOffset);
+                Link.Length = Link.MaximumLength = (USHORT)(LinkInfo->DataLength & ~(sizeof(WCHAR) - 1));
+                while (Link.Length && Link.Buffer[Link.Length / sizeof(WCHAR) - 1] == UNICODE_NULL)
+                    Link.Length -= sizeof(WCHAR);
+                Status = IoSetDeviceInterfaceState(&Link, FALSE);
+                if (!NT_SUCCESS(Status) && Status != STATUS_OBJECT_NAME_NOT_FOUND)
+                    DPRINT1("Failed to disable %wZ, Status 0x%08lx\n", &Link, Status);
+            }
+            ExFreePool(LinkInfo);
+        }
+        ZwClose(InterfaceKey);
+    }
+
+    ExFreePoolWithTag(KeyName.Buffer, TAG_IO);
+    ExFreePoolWithTag(ClassInfo, TAG_IO);
+    ZwClose(ClassesKey);
 }
 
 /* EOF */

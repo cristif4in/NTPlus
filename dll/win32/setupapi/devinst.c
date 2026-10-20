@@ -3624,6 +3624,7 @@ BOOL WINAPI SetupDiGetDeviceInterfaceDetailW(
         else
         {
             strcpyW(DeviceInterfaceDetailData->DevicePath, devName);
+            CharLowerW(DeviceInterfaceDetailData->DevicePath);
             TRACE("DevicePath is %s\n", debugstr_w(DeviceInterfaceDetailData->DevicePath));
             ret = TRUE;
         }
@@ -3679,7 +3680,7 @@ static struct PropertyMapEntry PropertyMap[] = {
     { 0, NULL, NULL }, /* SPDRP_ADDRESS */
     { REG_SZ, "UINumberDescFormat", REGSTR_UI_NUMBER_DESC_FORMAT },
     { 0, NULL, NULL }, /* SPDRP_DEVICE_POWER_DATA */
-    { 0, NULL, NULL }, /* SPDRP_REMOVAL_POLICY */
+    { 0, NULL, NULL, DEVPROP_TYPE_UINT32 }, /* SPDRP_REMOVAL_POLICY */
     { 0, NULL, NULL }, /* SPDRP_REMOVAL_POLICY_HW_DEFAULT */
     { 0, NULL, NULL }, /* SPDRP_REMOVAL_POLICY_OVERRIDE */
     { 0, NULL, NULL }, /* SPDRP_INSTALL_STATE */
@@ -7036,7 +7037,8 @@ InfIsFromOEMLocation(
             strcatW(Windir, BackSlash);
         strcatW(Windir, InfDirectory);
 
-        if (strncmpiW(FullName, Windir, last - FullName) == 0)
+        if ((SIZE_T)(last - FullName + 1) == strlenW(Windir) &&
+            strncmpiW(FullName, Windir, last - FullName + 1) == 0)
         {
             /* The path is %SYSTEMROOT%\Inf */
             *IsOEMLocation = FALSE;

@@ -147,123 +147,90 @@ static HRESULT TryShellExecuteHooks(LPSHELLEXECUTEINFOW pSEI)
     return hr;
 }
 
-static void ParseNoTildeEffect(PWSTR &res, LPCWSTR &args, DWORD &len, DWORD &used, int argNum)
+static void ArgifyEmit(PWSTR &res, DWORD &len, DWORD &used, WCHAR ch)
 {
-    bool firstCharQuote = false;
-    bool quotes_opened = false;
-    bool backslash_encountered = false;
-
-    for (int curArg = 0; curArg <= argNum && *args; ++curArg)
-    {
-        firstCharQuote = false;
-        if (*args == '"')
-        {
-            quotes_opened = true;
-            firstCharQuote = true;
-            args++;
-        }
-
-        while(*args)
-        {
-            if (*args == '\\')
-            {
-                // if we found a backslash then flip the variable
-                backslash_encountered = !backslash_encountered;
-            }
-            else if (*args == '"')
-            {
-                if (quotes_opened)
-                {
-                    if (*(args + 1) != '"')
-                    {
-                        quotes_opened = false;
-                        args++;
-                        break;
-                    }
-                    else
-                    {
-                        args++;
-                    }
-                }
-                else
-                {
-                    quotes_opened = true;
-                }
-
-                backslash_encountered = false;
-            }
-            else
-            {
-                backslash_encountered = false;
-                if (*args == ' ' && !firstCharQuote)
-                    break;
-            }
-
-            if (curArg == argNum)
-            {
-                used++;
-                if (used < len)
-                    *res++ = *args;
-            }
-
-            args++;
-        }
-
-        while(*args == ' ')
-            ++args;
-    }
+    used++;
+    if (used < len)
+        *res++ = ch;
 }
 
-static void ParseTildeEffect(PWSTR &res, LPCWSTR &args, DWORD &len, DWORD &used, int argNum)
+static BOOL ArgifyQuotedIsClosed(LPCWSTR cursor)
 {
-    bool quotes_opened = false;
-    bool backslash_encountered = false;
+    SIZE_T quotes;
 
-    for (int curArg = 0; curArg <= argNum && *args; ++curArg)
+    while (*cursor)
     {
-        while(*args)
+        if (*cursor != '"')
         {
-            if (*args == '\\')
-            {
-                // if we found a backslash then flip the variable
-                backslash_encountered = !backslash_encountered;
-            }
-            else if (*args == '"')
-            {
-                if (quotes_opened)
-                {
-                    if (*(args + 1) != '"')
-                    {
-                        quotes_opened = false;
-                    }
-                    else
-                    {
-                        args++;
-                    }
-                }
-                else
-                {
-                    quotes_opened = true;
-                }
-
-                backslash_encountered = false;
-            }
-            else
-            {
-                backslash_encountered = false;
-                if (*args == ' ' && !quotes_opened && curArg != argNum)
-                    break;
-            }
-
-            if (curArg == argNum)
-            {
-                used++;
-                if (used < len)
-                    *res++ = *args;
-            }
-
-            args++;
+            cursor++;
+            continue;
         }
+        for (quotes = 0; cursor[quotes] == '"'; quotes++)
+            ;
+        if (quotes & 1)
+            return TRUE;
+        cursor += quotes;
+    }
+    return FALSE;
+}
+
+static LPCWSTR ArgifyParameter(LPCWSTR args, PWSTR &res, DWORD &len, DWORD &used, BOOL emit)
+{
+    BOOL quoted = (*args == '"');
+    LPCWSTR cursor = quoted ? args + 1 : args;
+    SIZE_T quotes, i;
+
+    if (quoted && emit && !ArgifyQuotedIsClosed(cursor))
+        emit = FALSE;
+
+    while (*cursor && (quoted || *cursor != ' '))
+    {
+        if (*cursor != '"')
+        {
+            if (emit)
+                ArgifyEmit(res, len, used, *cursor);
+            cursor++;
+            continue;
+        }
+        for (quotes = 0; cursor[quotes] == '"'; quotes++)
+            ;
+        cursor += quotes;
+        if (emit)
+        {
+            for (i = 0; i < quotes / 2; i++)
+                ArgifyEmit(res, len, used, '"');
+        }
+        if (quotes & 1)
+            break;
+    }
+    return cursor;
+}
+
+static void ArgifyArgument(LPCWSTR args, int index, BOOL tilde, PWSTR &res, DWORD &len, DWORD &used)
+{
+    LPCWSTR end = args, start;
+    int current;
+
+    for (current = 0; ; current++)
+    {
+        if (tilde && current == index)
+        {
+            while (*end)
+                ArgifyEmit(res, len, used, *end++);
+            return;
+        }
+
+        for (start = end; *start == ' '; start++)
+            ;
+        if (!*start)
+            return;
+
+        if (current == index)
+        {
+            ArgifyParameter(start, res, len, used, TRUE);
+            return;
+        }
+        end = ArgifyParameter(start, res, len, used, FALSE);
     }
 }
 
@@ -328,14 +295,16 @@ static BOOL SHELL_ArgifyW(WCHAR* out, DWORD len, const WCHAR* fmt, const WCHAR* 
                     {
                         if (*fmt == '*')
                         {
+                            LPCWSTR AllArgs = args;
+
                             used++;
-                            while(*args)
+                            while(*AllArgs)
                             {
                                 used++;
                                 if (used < len)
-                                    *res++ = *args++;
+                                    *res++ = *AllArgs++;
                                 else
-                                    args++;
+                                    AllArgs++;
                             }
                             used++;
                             break;
@@ -345,7 +314,14 @@ static BOOL SHELL_ArgifyW(WCHAR* out, DWORD len, const WCHAR* fmt, const WCHAR* 
                 break;
 
                 case '~':
-
+                    if (fmt[1] < '2' || fmt[1] > '9')
+                    {
+                        ArgifyEmit(res, len, used, '%');
+                        ArgifyEmit(res, len, used, '~');
+                        break;
+                    }
+                    fmt++;
+                    tildeEffect = true;
                 case '2':
                 case '3':
                 case '4':
@@ -356,24 +332,9 @@ static BOOL SHELL_ArgifyW(WCHAR* out, DWORD len, const WCHAR* fmt, const WCHAR* 
                 case '9':
                     //case '0':
                 {
-                    if (*fmt == '~')
-                    {
-                        fmt++;
-                        tildeEffect = true;
-                    }
-
                     if (args)
-                    {
-                        if (tildeEffect)
-                        {
-                            ParseTildeEffect(res, args, len, used, *fmt - '2');
-                            tildeEffect = false;
-                        }
-                        else
-                        {
-                            ParseNoTildeEffect(res, args, len, used, *fmt - '2');
-                        }
-                    }
+                        ArgifyArgument(args, *fmt - '2', tildeEffect, res, len, used);
+                    tildeEffect = false;
                 };
                 break;
 
@@ -475,44 +436,7 @@ static BOOL SHELL_ArgifyW(WCHAR* out, DWORD len, const WCHAR* fmt, const WCHAR* 
                     break;
 
                 default:
-                    /*
-                     * Check if this is an env-variable here...
-                     */
-
-                    /* Make sure that we have at least one more %.*/
-                    if (strchrW(fmt, '%'))
-                    {
-                        WCHAR   tmpBuffer[1024];
-                        PWSTR   tmpB = tmpBuffer;
-                        WCHAR   tmpEnvBuff[MAX_PATH];
-                        DWORD   envRet;
-
-                        while (*fmt != '%')
-                            *tmpB++ = *fmt++;
-                        *tmpB++ = 0;
-
-                        TRACE("Checking %s to be an env-var\n", debugstr_w(tmpBuffer));
-
-                        envRet = GetEnvironmentVariableW(tmpBuffer, tmpEnvBuff, MAX_PATH);
-                        if (envRet == 0 || envRet > MAX_PATH)
-                        {
-                            used += wcslen(tmpBuffer);
-                            if (used < len)
-                            {
-                                wcscpy( res, tmpBuffer );
-                                res += wcslen(tmpBuffer);
-                            }
-                        }
-                        else
-                        {
-                            used += wcslen(tmpEnvBuff);
-                            if (used < len)
-                            {
-                                wcscpy( res, tmpEnvBuff );
-                                res += wcslen(tmpEnvBuff);
-                            }
-                        }
-                    }
+                    ArgifyEmit(res, len, used, *fmt);
                     done = TRUE;
                     break;
             }
@@ -985,6 +909,15 @@ static UINT SHELL_FindExecutableByVerb(LPCWSTR lpVerb, LPWSTR key, LPWSTR classn
     HKEY hkeyClass;
     WCHAR verb[MAX_PATH];
 
+    if (*classname == L'.')
+    {
+        WCHAR ProgId[MAX_PATH];
+        LONG Length = sizeof(ProgId);
+
+        if (!RegQueryValueW(HKEY_CLASSES_ROOT, classname, ProgId, &Length) && *ProgId)
+            wcscpy(classname, ProgId);
+    }
+
     if (RegOpenKeyExW(HKEY_CLASSES_ROOT, classname, 0, KEY_READ, &hkeyClass))
         return SE_ERR_NOASSOC;
     if (!HCR_GetDefaultVerbW(hkeyClass, lpVerb, verb, ARRAY_SIZE(verb)))
@@ -996,8 +929,8 @@ static UINT SHELL_FindExecutableByVerb(LPCWSTR lpVerb, LPWSTR key, LPWSTR classn
     wcscat(classname, verb);
     wcscat(classname, L"\\command");
 
-    if (RegQueryValueW(HKEY_CLASSES_ROOT, classname, command,
-                       &commandlen) == ERROR_SUCCESS)
+    if (SHGetValueW(HKEY_CLASSES_ROOT, classname, NULL, NULL, command,
+                    (DWORD *)&commandlen) == ERROR_SUCCESS)
     {
         commandlen /= sizeof(WCHAR);
         if (key) wcscpy(key, classname);
@@ -1156,7 +1089,8 @@ static UINT SHELL_FindExecutable(LPCWSTR lpPath, LPCWSTR lpFile, LPCWSTR lpVerb,
         /* See if it's a program - if GetProfileString fails, we skip this
          * section. Actually, if GetProfileString fails, we've probably
          * got a lot more to worry about than running a program... */
-        if (GetProfileStringW(L"windows", L"programs", L"exe pif bat cmd com", wBuffer, ARRAY_SIZE(wBuffer)) > 0)
+        if ((!lpVerb || !*lpVerb) &&
+            GetProfileStringW(L"windows", L"programs", L"exe pif bat cmd com", wBuffer, ARRAY_SIZE(wBuffer)) > 0)
         {
             CharLowerW(wBuffer);
             tok = wBuffer;
@@ -1511,7 +1445,7 @@ static UINT_PTR execute_from_key(LPCWSTR key, LPCWSTR lpFile, WCHAR *env,
     param[0] = '\0';
 
     /* Get the application from the registry */
-    if (RegQueryValueW(HKEY_CLASSES_ROOT, key, cmd, (LONG *)&cmdlen) == ERROR_SUCCESS)
+    if (SHGetValueW(HKEY_CLASSES_ROOT, key, NULL, NULL, cmd, &cmdlen) == ERROR_SUCCESS)
     {
         TRACE("got cmd: %s\n", debugstr_w(cmd));
 
@@ -2490,6 +2424,18 @@ static BOOL SHELL_execute(LPSHELLEXECUTEINFOW sei, SHELL_ExecuteW32 execfunc)
         }
     }
 
+    if (PathIsRelativeW(wszDir))
+    {
+        WCHAR FullDir[MAX_PATH];
+        DWORD FullDirLength = GetFullPathNameW(wszDir, _countof(FullDir), FullDir, NULL);
+
+        if (FullDirLength && FullDirLength < _countof(FullDir))
+        {
+            StringCchCopyW(dirBuffer, _countof(dirBuffer), FullDir);
+            wszDir = dirBuffer;
+        }
+    }
+
     /* adjust string pointers to point to the new buffers */
     sei_tmp.lpFile = wszApplicationName;
     sei_tmp.lpParameters = wszParameters;
@@ -2584,6 +2530,7 @@ static BOOL SHELL_execute(LPSHELLEXECUTEINFOW sei, SHELL_ExecuteW32 execfunc)
             DBG_UNREFERENCED_LOCAL_VARIABLE(Info);
             do_error_dialog(retval, sei_tmp.hwnd, wszApplicationName);
         }
+        sei->hInstApp = (HINSTANCE)(retval > 32 ? 33 : retval);
         return retval > 32;
     }
 
@@ -2634,20 +2581,12 @@ static BOOL SHELL_execute(LPSHELLEXECUTEINFOW sei, SHELL_ExecuteW32 execfunc)
         /* If the executable path is quoted, handle the rest of the command line as parameters. */
         if (sei_tmp.lpFile[0] == L'"')
         {
-            LPWSTR pszArgs = PathGetArgsW(wszApplicationName);
-            PathRemoveArgsW(wszApplicationName);
+            if (*PathGetArgsW(wszApplicationName))
+            {
+                SetLastError(ERROR_FILE_NOT_FOUND);
+                return ExecuteFailed(SE_ERR_FNF, *sei, sei_tmp.lpFile, FALSE) > 32;
+            }
             PathUnquoteSpacesW(wszApplicationName);
-            parametersLen = lstrlenW(pszArgs);
-            if (parametersLen < _countof(parametersBuffer))
-            {
-                StringCchCopyW(parametersBuffer, _countof(parametersBuffer), pszArgs);
-                wszParameters = parametersBuffer;
-            }
-            else
-            {
-                wszParamAlloc.Attach(StrDupW(pszArgs));
-                wszParameters = wszParamAlloc;
-            }
         }
         /* We have to test sei instead of sei_tmp because sei_tmp had its
          * input fMask modified above in SHELL_translate_idlist.
@@ -2689,8 +2628,18 @@ static BOOL SHELL_execute(LPSHELLEXECUTEINFOW sei, SHELL_ExecuteW32 execfunc)
     CHeapPtr<WCHAR, CLocalAllocator> wcmdAlloc;
 
     /* Only execute if it has an executable extension */
-    if (PathIsExeW(lpFile))
+    if (PathIsExeW(lpFile) && (!sei_tmp.lpVerb || !*sei_tmp.lpVerb))
     {
+        WCHAR wszExePath[MAX_PATH];
+        LPCWSTR SearchPaths[] = { sei_tmp.lpDirectory, NULL };
+
+        if ((UINT)lstrlenW(wszApplicationName) < _countof(wszExePath) && PathIsFileSpecW(wszApplicationName))
+        {
+            StringCchCopyW(wszExePath, _countof(wszExePath), wszApplicationName);
+            if (PathFindOnPathW(wszExePath, SearchPaths))
+                StringCchCopyW(wszApplicationName, dwApplicationNameLen, wszExePath);
+        }
+
         len = lstrlenW(wszApplicationName) + 3;
         if (sei_tmp.lpParameters[0])
             len += 1 + lstrlenW(wszParameters);

@@ -1629,6 +1629,10 @@ HKLM,"SYSTEM\CurrentControlSet\Control\ReactOS\Settings\Version","ReportAsWorkst
 HKLM,"SYSTEM\CurrentControlSet\Control\Windows","CSDReleaseType",0x00010001,0x00000000
 HKLM,"SYSTEM\CurrentControlSet\Control\Windows","CSDVersion",0x00010001,0x00000200
 
+HKLM,"SYSTEM\CurrentControlSet\Control\Terminal Server","fDenyTSConnections",0x00010001,1
+HKLM,"SYSTEM\CurrentControlSet\Control\Terminal Server","fSingleSessionPerUser",0x00010001,1
+HKLM,"SYSTEM\CurrentControlSet\Control\Terminal Server","TSUserEnabled",0x00010001,0
+
 HKLM,"SYSTEM\CurrentControlSet\Control\TimeZoneInformation","Bias",0x00010001,0x00000000
 HKLM,"SYSTEM\CurrentControlSet\Control\TimeZoneInformation","StandardBias",0x00010001,0x00000000
 HKLM,"SYSTEM\CurrentControlSet\Control\TimeZoneInformation","DaylightBias",0x00010001,0x00000000
@@ -1916,12 +1920,15 @@ HKLM,"SYSTEM\CurrentControlSet\Services\Mup","ImagePath",0x00020000,"system32\dr
 HKLM,"SYSTEM\CurrentControlSet\Services\Mup","Start",0x00010001,0x00000000
 HKLM,"SYSTEM\CurrentControlSet\Services\Mup","Type",0x00010001,0x00000002
 
+HKLM,"SYSTEM\CurrentControlSet\Services\Npfs\Aliases","ntsvcs",0x00010000,"svcctl"
+
 ; NDIS driver - needs to load before any drivers in the NDIS group
 HKLM,"SYSTEM\CurrentControlSet\Services\Ndis","ErrorControl",0x00010001,0x00000001
 HKLM,"SYSTEM\CurrentControlSet\Services\Ndis","Group",0x00000000,"NDIS Wrapper"
 HKLM,"SYSTEM\CurrentControlSet\Services\Ndis","ImagePath",0x00020000,"system32\drivers\ndis.sys"
 HKLM,"SYSTEM\CurrentControlSet\Services\Ndis","Start",0x00010001,0x00000000
 HKLM,"SYSTEM\CurrentControlSet\Services\Ndis","Type",0x00010001,0x00000001
+HKLM,"SYSTEM\CurrentControlSet\Services\Ndis\Parameters\AdapterDefaults","Dot11dEnable",0x00000000,"1"
 
 ; NetLogon
 HKLM,"SYSTEM\CurrentControlSet\Services\NetLogon","DisplayName",0x00000000,%NETLOGON_SERVICE%

@@ -501,7 +501,10 @@ NTSTATUS WINAPI wow64_NtGdiDdDDICheckOcclusion( UINT *args )
         ULONG hWnd;
     } *desc32 = get_ptr( &args );
 #ifdef __REACTOS__
-    D3DKMT_CHECKOCCLUSION desc = {.hWnd = Handle32ToHandle( desc32->hWnd )};
+    D3DKMT_CHECKOCCLUSION desc;
+
+    if (!desc32) return NtGdiDdDDICheckOcclusion( NULL );
+    desc.hWnd = Handle32ToHandle( desc32->hWnd );
 #else
     D3DKMT_CHECKOCCLUSION desc = {.hWnd = UlongToHandle( desc32->hWnd )};
 #endif
@@ -1970,6 +1973,28 @@ NTSTATUS WINAPI wow64_NtGdiExtGetObjectW( UINT *args )
             }
             return count;
         }
+
+#ifdef __REACTOS__
+    case NTGDI_OBJ_BRUSH:
+        {
+            struct
+            {
+                UINT lbStyle;
+                COLORREF lbColor;
+                ULONG lbHatch;
+            } brush32;
+            LOGBRUSH brush;
+
+            if (!buffer) return NtGdiExtGetObjectW( handle, count, NULL ) ? sizeof(brush32) : 0;
+            if (!NtGdiExtGetObjectW( handle, count ? sizeof(brush) : 0, &brush )) return 0;
+
+            brush32.lbStyle = brush.lbStyle;
+            brush32.lbColor = brush.lbColor;
+            brush32.lbHatch = (ULONG)brush.lbHatch;
+            memcpy( buffer, &brush32, min( (UINT)count, sizeof(brush32) ));
+            return sizeof(brush32);
+        }
+#endif
 
     default:
         return NtGdiExtGetObjectW( handle, count, buffer );

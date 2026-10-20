@@ -194,6 +194,7 @@ typedef struct _NDIS6_DRIVER_BLOCK
     NDIS_MINIPORT_DRIVER_CHARACTERISTICS    Characteristics;
     BOOLEAN                                 IsWdi;
     NDIS_MINIPORT_DRIVER_WDI_CHARACTERISTICS WdiCharacteristics;
+    NDIS_MINIPORT_DRIVER_CHARACTERISTICS    WdiMiniportCharacteristics;
     NDIS_MINIPORT_PNP_CHARACTERISTICS       PnpCharacteristics;
     BOOLEAN                                 PnpCharacteristicsValid;
 #if NDIS_SUPPORT_NDIS630
@@ -597,6 +598,17 @@ Ndis6RegisterMiniportDriverInternal(
     _In_opt_ PNDIS_MINIPORT_DRIVER_WDI_CHARACTERISTICS WdiCharacteristics,
     _Out_ PNDIS_HANDLE NdisMiniportDriverHandle);
 
+BOOLEAN
+Ndis6WdiOidRequestComplete(
+    _In_ PLOGICAL_ADAPTER Adapter,
+    _In_ PNDIS_OID_REQUEST OidRequest,
+    _In_ NDIS_STATUS Status);
+
+BOOLEAN
+Ndis6WdiIndicateStatus(
+    _In_ PLOGICAL_ADAPTER Adapter,
+    _In_ PNDIS_STATUS_INDICATION StatusIndication);
+
 PNDIS6_DRIVER_BLOCK
 Ndis6FindDriverBlock(
     _In_ PDRIVER_OBJECT DriverObject);
@@ -658,7 +670,7 @@ Ndis6TryDispatchAdapterFdoIrp(
     _In_  PIRP           Irp,
     _Out_ NTSTATUS*      OutStatus);
 
-/* 60stubs.c — TRUE if DeviceObject was created by NdisRegisterDeviceEx. */
+/* 60device.c — TRUE if DeviceObject was created by NdisRegisterDeviceEx. */
 BOOLEAN
 Ndis6DeviceIsControlDevice(
     _In_ PDEVICE_OBJECT DeviceObject);
@@ -1057,6 +1069,9 @@ typedef struct _NDIS6_FILTER_DRIVER_BLOCK
 extern LIST_ENTRY g_Ndis6FilterDriverList;
 extern KSPIN_LOCK g_Ndis6FilterDriverListLock;
 
+VOID
+Ndis6FilterDriverListInit(VOID);
+
 NDIS_STATUS
 Ndis6AttachFiltersToAdapter(
     _In_ PLOGICAL_ADAPTER Adapter);
@@ -1247,6 +1262,12 @@ Ndis6DereferenceTransmit(
 
 extern LIST_ENTRY g_Ndis6ProtocolDriverList;
 extern KSPIN_LOCK g_Ndis6ProtocolDriverListLock;
+
+NDIS_STATUS
+Ndis6BuildProtocolSection(
+    _In_ PNDIS6_PROTOCOL_DRIVER_BLOCK Block,
+    _In_ PLOGICAL_ADAPTER Adapter,
+    _Out_ PUNICODE_STRING ProtocolSection);
 
 VOID
 Ndis6UnbindAllProtocolsFromAdapter(

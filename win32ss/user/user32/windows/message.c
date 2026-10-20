@@ -1576,23 +1576,53 @@ ULONG WINAPI IntGetThreadDpiContext(VOID);
 ULONG WINAPI IntSetThreadDpiContext(ULONG Context);
 
 static ULONG
-IntSetWindowDpiContext(PWND pWnd, PBOOL Changed)
+IntSetWindowDpiContext(PWND pWnd, HWND hWnd, PBOOL Changed)
 {
-  ULONG Current;
+  ULONG Current, WindowContext = 0;
 
   *Changed = FALSE;
-  if (!pWnd || !pWnd->DpiContext)
+#ifdef WOW64_I386_RUNTIME
+  UNREFERENCED_PARAMETER(pWnd);
+  if (hWnd)
+  {
+      DWORD Error = GetLastError();
+      WindowContext = NtUserGetWindowDpiAwarenessContext(hWnd);
+      SetLastError(Error);
+  }
+#else
+  UNREFERENCED_PARAMETER(hWnd);
+  if (pWnd)
+      WindowContext = pWnd->DpiContext;
+#endif
+  if (!WindowContext)
       return 0;
 
   Current = IntGetThreadDpiContext();
-  if ((Current & ~DPI_CONTEXT_FLAG_PROCESS) == (pWnd->DpiContext & ~DPI_CONTEXT_FLAG_PROCESS))
+  if ((Current & ~DPI_CONTEXT_FLAG_PROCESS) == (WindowContext & ~DPI_CONTEXT_FLAG_PROCESS))
       return 0;
 
-  Current = IntSetThreadDpiContext(pWnd->DpiContext);
+  Current = IntSetThreadDpiContext(WindowContext);
   if (Current)
       *Changed = TRUE;
 
   return Current;
+}
+
+static BOOL
+IntIsWow64DialogWindow(HWND hWnd)
+{
+#ifdef WOW64_I386_RUNTIME
+  ROS_WINDOWINFO Info;
+  DWORD Error = GetLastError();
+  BOOL Ret = NtUserCallHwndParam(hWnd, (DWORD_PTR)&Info, HWNDPARAM_ROUTINE_ROS_GETWINDOWINFO) &&
+             Info.fnid == FNID_DIALOG;
+
+  SetLastError(Error);
+  return Ret;
+#else
+  UNREFERENCED_PARAMETER(hWnd);
+  return FALSE;
+#endif
 }
 
 LRESULT FASTCALL
@@ -1619,7 +1649,7 @@ IntCallWindowProcW(BOOL IsAnsiProc,
   }
 
   WndProc = User32TranslateSharedPfn(WndProc);
-  PreviousDpiContext = IntSetWindowDpiContext(pWnd, &DpiContextChanged);
+  PreviousDpiContext = IntSetWindowDpiContext(pWnd, hWnd, &DpiContextChanged);
 
   if (pWnd)
      Dialog = (pWnd->fnid == FNID_DIALOG);
@@ -1629,7 +1659,7 @@ IntCallWindowProcW(BOOL IsAnsiProc,
   Hook = BeginIfHookedUserApiHook();
   if (Hook)
   {
-     if (Dialog && (WndProc == DefDlgProcW || WndProc == DefDlgProcA))
+     if ((WndProc == DefDlgProcW || WndProc == DefDlgProcA) && (Dialog || IntIsWow64DialogWindow(hWnd)))
         DlgOverride = IsMsgOverride( Msg, &guah.DlgProcArray);
      MsgOverride = IsMsgOverride( Msg, &guah.WndProcArray);
   }
@@ -1788,7 +1818,7 @@ IntCallWindowProcA(BOOL IsAnsiProc,
   }
 
   WndProc = User32TranslateSharedPfn(WndProc);
-  PreviousDpiContext = IntSetWindowDpiContext(pWnd, &DpiContextChanged);
+  PreviousDpiContext = IntSetWindowDpiContext(pWnd, hWnd, &DpiContextChanged);
 
   if (pWnd)
      Dialog = (pWnd->fnid == FNID_DIALOG);
@@ -1798,7 +1828,7 @@ IntCallWindowProcA(BOOL IsAnsiProc,
   Hook = BeginIfHookedUserApiHook();
   if (Hook)
   {
-     if (Dialog && (WndProc == DefDlgProcW || WndProc == DefDlgProcA))
+     if ((WndProc == DefDlgProcW || WndProc == DefDlgProcA) && (Dialog || IntIsWow64DialogWindow(hWnd)))
         DlgOverride = IsMsgOverride( Msg, &guah.DlgProcArray);
      MsgOverride = IsMsgOverride( Msg, &guah.WndProcArray);
   }
@@ -1952,7 +1982,7 @@ IntCallMessageProc(IN PWND Wnd, IN HWND hWnd, IN UINT Msg, IN WPARAM wParam, IN 
    */
     TRACE("HWND %p, MSG %u, WPARAM %p, LPARAM %p, Ansi %d\n", hWnd, Msg, wParam, lParam, Ansi);
 //    if (Class->fnid <= FNID_GHOST && Class->fnid >= FNID_BUTTON )
-    if (Class->fnid <= FNID_GHOST && Class->fnid >= FNID_FIRST )
+    if (Class->fnid <= FNID_GHOST && Class->fnid >= FNID_FIRST && Class->fnid != FNID_DIALOG)
     {
        if (Ansi)
        {

@@ -665,6 +665,7 @@ typedef enum _DEVICE_ACTION
     PiActionRemoveDevice,
     PiActionQueryRemoveDevice,
     PiActionCloseRemovedDevice,
+    PiActionEjectDevice,
 } DEVICE_ACTION;
 
 //
@@ -912,6 +913,10 @@ IoPnPDeliverServicePowerSetting(
     _In_ ULONG ServiceStatusHandle,
     _In_reads_bytes_(SettingSize) PVOID Setting,
     _In_ ULONG SettingSize);
+
+VOID
+IopDisableDeviceInterfaces(
+    _In_ PDEVICE_NODE DeviceNode);
 
 NTSTATUS
 NTAPI

@@ -13,9 +13,40 @@
 #define NDEBUG
 #include <debug.h>
 
+static const DOT11_BSSID_LIST *
+WlanSvcRestrictingBssids(const DOT11_BSSID_LIST *List)
+{
+    static const UCHAR Wildcard[6] = { 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF };
+    ULONG i;
+
+    if (List == NULL || List->uNumOfEntries == 0)
+        return NULL;
+    for (i = 0; i < List->uNumOfEntries && i < List->uTotalNumOfEntries; i++)
+    {
+        if (memcmp(&List->BSSIDs[i], Wildcard, sizeof(Wildcard)) == 0)
+            return NULL;
+    }
+    return List;
+}
+
+static BOOL
+WlanSvcBssDesired(const DOT11_BSSID_LIST *Desired, const DOT11_MAC_ADDRESS *Bssid)
+{
+    ULONG i;
+
+    if (Desired == NULL)
+        return TRUE;
+    for (i = 0; i < Desired->uNumOfEntries && i < Desired->uTotalNumOfEntries; i++)
+    {
+        if (memcmp(&Desired->BSSIDs[i], Bssid, sizeof(DOT11_MAC_ADDRESS)) == 0)
+            return TRUE;
+    }
+    return FALSE;
+}
+
 /* Find the strongest cached BSS matching an SSID (+ optional BSS type). */
 static PWLANSVC_BSS_ENTRY
-WlanSvcPickBss(PWLANSVC_INTERFACE Iface, PDOT11_SSID pSsid, DOT11_BSS_TYPE BssType)
+WlanSvcPickBss(PWLANSVC_INTERFACE Iface, PDOT11_SSID pSsid, DOT11_BSS_TYPE BssType, const DOT11_BSSID_LIST *Desired)
 {
     PLIST_ENTRY entry;
     PWLANSVC_BSS_ENTRY best = NULL;
@@ -31,6 +62,8 @@ WlanSvcPickBss(PWLANSVC_INTERFACE Iface, PDOT11_SSID pSsid, DOT11_BSS_TYPE BssTy
             memcmp(pSsid->ucSSID, bss->Ssid.ucSSID, pSsid->uSSIDLength) != 0)
             continue;
         if (BssType != dot11_BSS_type_any && bss->BssType != BssType)
+            continue;
+        if (!WlanSvcBssDesired(Desired, &bss->Bssid))
             continue;
 
         if (best == NULL || bss->Rssi > best->Rssi)
@@ -79,6 +112,7 @@ WlanSvcConnect(PWLANSVC_INTERFACE Iface, const PWLAN_CONNECTION_PARAMETERS pPara
     NWIFI_CONNECT_REQUEST req;
     PWLANSVC_PROFILE prof = NULL;
     PWLANSVC_BSS_ENTRY bss;
+    const DOT11_BSSID_LIST *desired;
     DOT11_SSID ssid;
     DOT11_BSS_TYPE bssType;
     DOT11_AUTH_ALGORITHM auth = DOT11_AUTH_ALGO_80211_OPEN;
@@ -128,8 +162,9 @@ WlanSvcConnect(PWLANSVC_INTERFACE Iface, const PWLAN_CONNECTION_PARAMETERS pPara
     /* Choose a BSS from the cache. Scanning is asynchronous and must not be
      * overlapped with the firmware join; profile connects can still let the
      * lower miniport select a BSSID when the cache is empty. */
-    bss = WlanSvcPickBss(Iface, &ssid, bssType);
-    if (bss == NULL && prof == NULL)
+    desired = WlanSvcRestrictingBssids(pParams->pDesiredBssidList);
+    bss = WlanSvcPickBss(Iface, &ssid, bssType, desired);
+    if (bss == NULL && (prof == NULL || desired != NULL))
         return ERROR_NOT_FOUND;
 
     WlanSvcIndicateAcm(Iface, wlan_notification_acm_connection_start);
@@ -173,7 +208,7 @@ WlanSvcConnect(PWLANSVC_INTERFACE Iface, const PWLAN_CONNECTION_PARAMETERS pPara
     req.AuthAlgorithm = auth;
     req.UnicastCipher = cipher;
     req.MulticastCipher = groupCipher;
-    if (bss != NULL)
+    if (bss != NULL && desired != NULL)
         req.DesiredBssid = bss->Bssid;  /* all-zero => any BSSID for the SSID */
 
     /* Remember the intended connection so the async complete can finalise it. */
@@ -212,10 +247,14 @@ WlanSvcDisconnect(PWLANSVC_INTERFACE Iface)
 
     WlanSvcIndicateAcm(Iface, wlan_notification_acm_disconnecting);
     Iface->State = wlan_interface_state_disconnecting;
+    if (Iface->Connected)
+        WlanSvcIndicateMsm(Iface, WLANSVC_NOTIFICATION_MSM_DISASSOCIATING, WLAN_REASON_CODE_SUCCESS);
 
     dwResult = NwifiDisconnect(Iface->NwifiIndex, Iface->UpperLuid,
                                &Iface->MacAddress);
 
+    if (Iface->Connected)
+        WlanSvcIndicateMsm(Iface, WLANSVC_NOTIFICATION_MSM_DISCONNECTED, WLAN_REASON_CODE_SUCCESS);
     Iface->Connected = FALSE;
     ZeroMemory(&Iface->ConnectedSsid, sizeof(DOT11_SSID));
     ZeroMemory(&Iface->ConnectedBssid, sizeof(DOT11_MAC_ADDRESS));
@@ -255,6 +294,10 @@ WlanSvcUpdateLinkState(PWLANSVC_INTERFACE Iface)
         Iface->Connected = TRUE;
         Iface->State = wlan_interface_state_connected;
         Iface->ConnectedSsid = ls.Ssid;
+        Iface->ConnectedBssid = ls.Bssid;
+    }
+    else if (ls.Status == NwifiLinkAssociating)
+    {
         Iface->ConnectedBssid = ls.Bssid;
     }
     else if (ls.Status == NwifiLinkDisconnected)
@@ -323,7 +366,11 @@ WlanSvcQueryInterface(PWLANSVC_INTERFACE Iface,
 
         case wlan_intf_opcode_rssi:
         {
-            LONG rssi = Iface->Rssi;
+            LONG rssi;
+
+            if (Iface->Connected)
+                WlanSvcUpdateLinkState(Iface);
+            rssi = Iface->Rssi;
             return WlanSvcReturnBlob(&rssi, sizeof(rssi), ppData, pdwDataSize);
         }
 
@@ -331,6 +378,8 @@ WlanSvcQueryInterface(PWLANSVC_INTERFACE Iface,
         {
             WLAN_CONNECTION_ATTRIBUTES ca;
 
+            if (Iface->Connected)
+                WlanSvcUpdateLinkState(Iface);
             if (!Iface->Connected)
                 return ERROR_INVALID_STATE;
 

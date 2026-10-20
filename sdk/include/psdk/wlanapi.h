@@ -350,6 +350,18 @@ typedef struct _WLAN_CONNECTION_NOTIFICATION_DATA {
     WCHAR strProfileXml[1];
 } WLAN_CONNECTION_NOTIFICATION_DATA, *PWLAN_CONNECTION_NOTIFICATION_DATA;
 
+typedef struct _WLAN_MSM_NOTIFICATION_DATA {
+    WLAN_CONNECTION_MODE wlanConnectionMode;
+    WCHAR strProfileName[WLAN_MAX_NAME_LENGTH];
+    DOT11_SSID dot11Ssid;
+    DOT11_BSS_TYPE dot11BssType;
+    DOT11_MAC_ADDRESS dot11MacAddr;
+    BOOL bSecurityEnabled;
+    BOOL bFirstPeer;
+    BOOL bLastPeer;
+    WLAN_REASON_CODE wlanReasonCode;
+} WLAN_MSM_NOTIFICATION_DATA, *PWLAN_MSM_NOTIFICATION_DATA;
+
 /* Notification source masks; values match L2_NOTIFICATION_SOURCE_*. */
 #define WLAN_NOTIFICATION_SOURCE_NONE         0x00000000
 #define WLAN_NOTIFICATION_SOURCE_ALL          0x0000FFFF
@@ -500,6 +512,7 @@ DWORD WINAPI WlanSetProfileCustomUserData(IN HANDLE hClientHandle, IN const GUID
 DWORD WINAPI WlanSetProfileEapUserData(IN HANDLE hClientHandle, IN const GUID *pInterfaceGuid, IN LPCWSTR strProfileName, IN EAP_METHOD_TYPE eapType, IN DWORD dwFlags, IN DWORD dwEapUserDataSize, IN const LPBYTE pbEapUserData, PVOID pReserved);
 DWORD WINAPI WlanSetProfileList(IN HANDLE hClientHandle, IN const GUID *pInterfaceGuid, DWORD dwItems, IN LPCWSTR *strProfileNames, PVOID pReserved);
 DWORD WINAPI WlanSetSecuritySettings(IN HANDLE hClientHandle, IN WLAN_SECURABLE_OBJECT SecurableObject, IN LPCWSTR strModifiedSDDL);
+DWORD WINAPI WlanGetSecuritySettings(IN HANDLE hClientHandle, IN WLAN_SECURABLE_OBJECT SecurableObject, OUT WLAN_OPCODE_VALUE_TYPE *pValueType OPTIONAL, OUT LPWSTR *pstrCurrentSDDL, OUT PDWORD pdwGrantedAccess);
 DWORD WINAPI WlanScan(IN HANDLE hClientHandle, IN const GUID *pInterfaceGuid, IN PDOT11_SSID pDot11Ssid, IN PWLAN_RAW_DATA pIeData, PVOID pReserved);
 #endif
 

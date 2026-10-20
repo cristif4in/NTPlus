@@ -426,15 +426,6 @@ IntDeactivateWindow(PTHREADINFO pti, HANDLE tid)
    MsqReleaseModifierKeys(pti->MessageQueue);
 
    if (InAAPM) pti->TIF_flags &= ~TIF_INACTIVATEAPPMSG;
-   if (pti->MessageQueue == DeactivatedQueue &&
-       DeactivatedQueue != gpqForeground &&
-       !(DeactivatedQueue->QF_flags & QF_INDESTROY) &&
-       !DeactivatedQueue->spwndActive &&
-       !DeactivatedQueue->spwndFocus &&
-       !DeactivatedQueue->CaretInfo.hWnd)
-   {
-      IntNotifyWinEvent(EVENT_OBJECT_HIDE, NULL, OBJID_CARET, CHILDID_SELF, 0);
-   }
    IntDereferenceMessageQueue(DeactivatedQueue);
    if (ptiCurrent != pti)
    {
@@ -475,7 +466,7 @@ IntActivateWindow(PWND Wnd, PTHREADINFO pti, HANDLE tid, DWORD Type)
 
               co_IntSendMessage( UserHMGetHandle(Wnd), WM_NCACTIVATE, wParam, 0);
 
-              if (wParam)
+              if (wParam && Wnd->head.pti->MessageQueue == gpqForeground)
               {
                   UpdateShellHook(Wnd);
 
@@ -850,6 +841,11 @@ co_IntSetForegroundMessageQueue(
       return FALSE;
    }
 
+   if (Wnd && gpdeskInputDesktop && Wnd->head.rpdesk != gpdeskInputDesktop)
+   {
+      return FALSE;
+   }
+
    if ( !gptiForeground || gptiForeground->TIF_flags & TIF_INCLEANUP )
       ptiPrev = NULL;
    else
@@ -944,9 +940,12 @@ co_IntSetForegroundMessageQueue(
               {
                  co_IntSendMessage( UserHMGetHandle(Wnd), WM_NCACTIVATE, TRUE, (LPARAM)UserHMGetHandle(Wnd));
 
-                 UpdateShellHook(Wnd);
+                 if (gpqForeground == pumq)
+                 {
+                    UpdateShellHook(Wnd);
 
-                 co_WinPosSetWindowPos(Wnd, HWND_TOP, 0, 0, 0, 0, SWP_NOSIZE | SWP_NOMOVE);
+                    co_WinPosSetWindowPos(Wnd, HWND_TOP, 0, 0, 0, 0, SWP_NOSIZE | SWP_NOMOVE);
+                 }
               }
               else
               {
@@ -1104,6 +1103,7 @@ co_IntSetActiveWindow(
    HWND hWndPrev;
    HWND hWnd = 0;
    BOOL InAAPM;
+   LRESULT HookVeto;
    CBTACTIVATESTRUCT cbt;
 
    //ERR("co_IntSetActiveWindow 1\n");
@@ -1152,7 +1152,10 @@ co_IntSetActiveWindow(
    /* Call CBT hook chain */
    cbt.fMouse     = bMouse;
    cbt.hWndActive = hWndPrev;
-   if (co_HOOK_CallHooks( WH_CBT, HCBT_ACTIVATE, (WPARAM)hWnd, (LPARAM)&cbt))
+   Wnd->state |= WNDS_BEINGACTIVATED;
+   HookVeto = co_HOOK_CallHooks( WH_CBT, HCBT_ACTIVATE, (WPARAM)hWnd, (LPARAM)&cbt);
+   Wnd->state &= ~WNDS_BEINGACTIVATED;
+   if (HookVeto)
    {
       ERR("SetActiveWindow: WH_CBT Call Hook return!\n");
       return FALSE;
@@ -1260,6 +1263,13 @@ IntUserSetActiveWindow(
    while (Wnd)
    {
       BOOL Ret, DoFG, AllowFG;
+
+      if (gpdeskInputDesktop && Wnd->head.rpdesk != gpdeskInputDesktop)
+      {
+         if (ThreadQueue == Wnd->head.pti->MessageQueue)
+            break;
+         return FALSE;
+      }
 
       if (ThreadQueue == Wnd->head.pti->MessageQueue)
       {

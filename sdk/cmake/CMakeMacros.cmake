@@ -925,6 +925,7 @@ function(create_registry_hives)
 
     find_program(MKCOMREG_PYTHON_EXECUTABLE NAMES python3 python REQUIRED NO_CMAKE_FIND_ROOT_PATH)
     set(_syssetup_inf ${CMAKE_SOURCE_DIR}/media/inf/syssetup.inf)
+    set(_comreg_code_inf ${CMAKE_SOURCE_DIR}/boot/bootdata/comreg_code.inf)
     set(_comreg_inf ${CMAKE_BINARY_DIR}/boot/bootdata/comreg.inf)
     set(_comreg_list ${CMAKE_BINARY_DIR}/boot/bootdata/comreg_modules-$<CONFIG>.txt)
     get_property(_comreg_targets GLOBAL PROPERTY CI_SYSTEM_TARGETS)
@@ -943,8 +944,8 @@ function(create_registry_hives)
     file(GENERATE OUTPUT ${_comreg_wow64_list} CONTENT "${_comreg_wow64_modules}")
     add_custom_command(
         OUTPUT ${_comreg_inf}
-        COMMAND ${MKCOMREG_PYTHON_EXECUTABLE} ${CMAKE_SOURCE_DIR}/sdk/tools/mkcomreg.py ${_syssetup_inf} ${_comreg_list} ${_comreg_wow64_list} ${_comreg_inf}
-        DEPENDS ${_comreg_targets} ${WOW64_I386_FILES} ${_syssetup_inf} ${CMAKE_SOURCE_DIR}/sdk/tools/mkcomreg.py ${_comreg_list} ${_comreg_wow64_list}
+        COMMAND ${MKCOMREG_PYTHON_EXECUTABLE} ${CMAKE_SOURCE_DIR}/sdk/tools/mkcomreg.py ${_syssetup_inf} ${_comreg_code_inf} ${_comreg_list} ${_comreg_wow64_list} ${_comreg_inf}
+        DEPENDS ${_comreg_targets} ${WOW64_I386_FILES} ${_syssetup_inf} ${_comreg_code_inf} ${CMAKE_SOURCE_DIR}/sdk/tools/mkcomreg.py ${_comreg_list} ${_comreg_wow64_list}
         VERBATIM)
 
     # LiveCD hives
@@ -1177,4 +1178,10 @@ function(set_target_cpp_properties _target)
     if (_CPP_WITH_RTTI)
         set_target_properties(${_target} PROPERTIES WITH_CXX_RTTI TRUE)
     endif()
+endfunction()
+
+function(libernt_standard_disk_signature _signature)
+    string(UUID _disk NAMESPACE 354fa6e5-5e45-49af-91bf-1fd2754e470a NAME "LiberNT standard disk" TYPE SHA1)
+    string(SUBSTRING "${_disk}" 0 8 _value)
+    set(${_signature} ${_value} PARENT_SCOPE)
 endfunction()

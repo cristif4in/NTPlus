@@ -61,6 +61,7 @@ FdoEnumerateDevices(
     PCI_COMMON_CONFIG PciConfig;
     PPCI_DEVICE Device;
     PCI_SLOT_NUMBER SlotNumber;
+    PLIST_ENTRY CurrentEntry;
     ULONG DeviceNumber;
     ULONG FunctionNumber;
     ULONG Bus;
@@ -73,6 +74,12 @@ FdoEnumerateDevices(
            DeviceExtension->BusRangeStart, DeviceExtension->BusRangeEnd);
 
     DeviceExtension->DeviceListCount = 0;
+    for (CurrentEntry = DeviceExtension->DeviceListHead.Flink;
+         CurrentEntry != &DeviceExtension->DeviceListHead;
+         CurrentEntry = CurrentEntry->Flink)
+    {
+        CONTAINING_RECORD(CurrentEntry, PCI_DEVICE, ListEntry)->Reported = FALSE;
+    }
 
     /*
      * A PCI FDO owns and enumerates exactly one bus.  BusRangeStart/End is
@@ -243,6 +250,7 @@ FdoEnumerateDevices(
                     &DeviceExtension->DeviceListLock);
             }
 
+            Device->Reported = TRUE;
             DeviceExtension->DeviceListCount++;
 
             /* Skip to next device if the current one is not a multifunction device */
@@ -317,8 +325,23 @@ FdoQueryBusRelations(
     while (CurrentEntry != &DeviceExtension->DeviceListHead)
     {
         Device = CONTAINING_RECORD(CurrentEntry, PCI_DEVICE, ListEntry);
+        CurrentEntry = CurrentEntry->Flink;
 
         PdoDeviceExtension = NULL;
+
+        if (!Device->Reported)
+        {
+            if (!Device->Pdo)
+            {
+                KIRQL OldIrql;
+
+                KeAcquireSpinLock(&DeviceExtension->DeviceListLock, &OldIrql);
+                RemoveEntryList(&Device->ListEntry);
+                KeReleaseSpinLock(&DeviceExtension->DeviceListLock, OldIrql);
+                ExFreePoolWithTag(Device, TAG_PCI);
+            }
+            continue;
+        }
 
         if (!Device->Pdo)
         {
@@ -435,8 +458,6 @@ FdoQueryBusRelations(
         Relations->Objects[i] = Device->Pdo;
 
         i++;
-
-        CurrentEntry = CurrentEntry->Flink;
     }
 
     /* Release the global PCI lock */
@@ -469,6 +490,142 @@ FdoQueryBusRelations(
 }
 
 
+static
+VOID
+NTAPI
+FdoSlotNotify(
+    _In_ PVOID Context,
+    _In_ ULONG NotifyCode)
+{
+    PPCI_SLOT_NOTIFY Slot = Context;
+    PFDO_DEVICE_EXTENSION DeviceExtension = Slot->FdoExtension;
+    PDEVICE_OBJECT Pdo = NULL;
+    PLIST_ENTRY CurrentEntry;
+    KIRQL OldIrql;
+
+    DPRINT("PCI: notify %#lx for slot %lu on bus %lu\n", NotifyCode, Slot->DeviceNumber, DeviceExtension->BusNumber);
+
+    switch (NotifyCode)
+    {
+        case PCI_ACPI_NOTIFY_BUS_CHECK:
+        case PCI_ACPI_NOTIFY_DEVICE_CHECK:
+            IoInvalidateDeviceRelations(DeviceExtension->PhysicalDeviceObject, BusRelations);
+            break;
+
+        case PCI_ACPI_NOTIFY_EJECT_REQUEST:
+            KeAcquireSpinLock(&DeviceExtension->DeviceListLock, &OldIrql);
+            for (CurrentEntry = DeviceExtension->DeviceListHead.Flink;
+                 CurrentEntry != &DeviceExtension->DeviceListHead;
+                 CurrentEntry = CurrentEntry->Flink)
+            {
+                PPCI_DEVICE Device = CONTAINING_RECORD(CurrentEntry, PCI_DEVICE, ListEntry);
+
+                if (Device->Reported && Device->Pdo != NULL &&
+                    Device->SlotNumber.u.bits.DeviceNumber == Slot->DeviceNumber &&
+                    Device->SlotNumber.u.bits.FunctionNumber == 0)
+                {
+                    Pdo = Device->Pdo;
+                    ObReferenceObject(Pdo);
+                    break;
+                }
+            }
+            KeReleaseSpinLock(&DeviceExtension->DeviceListLock, OldIrql);
+
+            if (Pdo != NULL)
+            {
+                IoRequestDeviceEject(Pdo);
+                ObDereferenceObject(Pdo);
+            }
+            break;
+
+        default:
+            break;
+    }
+}
+
+static
+VOID
+FdoRegisterSlotNotifications(
+    _In_ PFDO_DEVICE_EXTENSION DeviceExtension)
+{
+    ACPI_INTERFACE_STANDARD2 Interface;
+    PPCI_SLOT_NOTIFY Slot;
+    ULONG DeviceNumber;
+
+    if (!IsListEmpty(&DeviceExtension->SlotNotifyListHead))
+        return;
+
+    for (DeviceNumber = 0; DeviceNumber < PCI_MAX_DEVICES; DeviceNumber++)
+    {
+        if (!NT_SUCCESS(PciAcpiQuerySlotNotifyInterface(DeviceExtension->BusSegment,
+                                                        DeviceExtension->BusNumber,
+                                                        DeviceNumber,
+                                                        0,
+                                                        &Interface)))
+        {
+            continue;
+        }
+
+        Slot = ExAllocatePoolWithTag(NonPagedPool, sizeof(*Slot), TAG_PCI);
+        if (Slot == NULL)
+        {
+            Interface.InterfaceDereference(Interface.Context);
+            return;
+        }
+
+        Slot->FdoExtension = DeviceExtension;
+        Slot->DeviceNumber = DeviceNumber;
+        Slot->Interface = Interface;
+        if (!NT_SUCCESS(Slot->Interface.RegisterForDeviceNotifications(Slot->Interface.Context, FdoSlotNotify, Slot)))
+        {
+            Slot->Interface.InterfaceDereference(Slot->Interface.Context);
+            ExFreePoolWithTag(Slot, TAG_PCI);
+            continue;
+        }
+
+        InsertTailList(&DeviceExtension->SlotNotifyListHead, &Slot->ListEntry);
+    }
+}
+
+static
+VOID
+FdoUnregisterSlotNotifications(
+    _In_ PFDO_DEVICE_EXTENSION DeviceExtension)
+{
+    PPCI_SLOT_NOTIFY Slot;
+
+    while (!IsListEmpty(&DeviceExtension->SlotNotifyListHead))
+    {
+        Slot = CONTAINING_RECORD(RemoveHeadList(&DeviceExtension->SlotNotifyListHead), PCI_SLOT_NOTIFY, ListEntry);
+        Slot->Interface.UnregisterForDeviceNotifications(Slot->Interface.Context);
+        Slot->Interface.InterfaceDereference(Slot->Interface.Context);
+        ExFreePoolWithTag(Slot, TAG_PCI);
+    }
+}
+
+static BOOLEAN
+PciFdoReserveWindows(
+    _Inout_ PPCI_ADDRESS_WINDOW *Windows,
+    _Inout_ PULONG Capacity,
+    _In_ ULONG Needed)
+{
+    PPCI_ADDRESS_WINDOW NewWindows;
+
+    if (Needed <= *Capacity)
+        return TRUE;
+
+    NewWindows = ExAllocatePoolWithTag(NonPagedPool, Needed * sizeof(PCI_ADDRESS_WINDOW), TAG_PCI);
+    if (NewWindows == NULL)
+        return FALSE;
+
+    RtlZeroMemory(NewWindows, Needed * sizeof(PCI_ADDRESS_WINDOW));
+    if (*Windows != NULL)
+        ExFreePoolWithTag(*Windows, TAG_PCI);
+    *Windows = NewWindows;
+    *Capacity = Needed;
+    return TRUE;
+}
+
 static NTSTATUS
 FdoStartDevice(
     IN PDEVICE_OBJECT DeviceObject,
@@ -478,6 +635,8 @@ FdoStartDevice(
     PCM_RESOURCE_LIST AllocatedResources;
     PCM_PARTIAL_RESOURCE_DESCRIPTOR ResourceDescriptor;
     ULONG FoundBusNumber = FALSE;
+    ULONG IoWindowsNeeded = 0;
+    ULONG MemoryWindowsNeeded = 0;
     ULONG i;
 #ifdef HAL_PCI_HAS_MSI_SUPPORT_QUERY
     BOOLEAN HalMsiSupported;
@@ -516,6 +675,28 @@ FdoStartDevice(
     for (i = 0; i < AllocatedResources->List[0].PartialResourceList.Count; i++)
     {
         ResourceDescriptor = &AllocatedResources->List[0].PartialResourceList.PartialDescriptors[i];
+        if (ResourceDescriptor->Type == CmResourceTypePort &&
+            (ResourceDescriptor->Flags & CM_RESOURCE_PORT_WINDOW_DECODE))
+        {
+            IoWindowsNeeded++;
+        }
+        else if ((ResourceDescriptor->Type == CmResourceTypeMemory ||
+                  ResourceDescriptor->Type == CmResourceTypeMemoryLarge) &&
+                 (ResourceDescriptor->Flags & CM_RESOURCE_MEMORY_WINDOW_DECODE))
+        {
+            MemoryWindowsNeeded++;
+        }
+    }
+
+    if (!PciFdoReserveWindows(&DeviceExtension->IoWindows, &DeviceExtension->IoWindowCapacity, IoWindowsNeeded) ||
+        !PciFdoReserveWindows(&DeviceExtension->MemoryWindows, &DeviceExtension->MemoryWindowCapacity, MemoryWindowsNeeded))
+    {
+        return STATUS_INSUFFICIENT_RESOURCES;
+    }
+
+    for (i = 0; i < AllocatedResources->List[0].PartialResourceList.Count; i++)
+    {
+        ResourceDescriptor = &AllocatedResources->List[0].PartialResourceList.PartialDescriptors[i];
         switch (ResourceDescriptor->Type)
         {
             case CmResourceTypeBusNumber:
@@ -550,7 +731,7 @@ FdoStartDevice(
             case CmResourceTypePort:
                 if ((ResourceDescriptor->Flags & CM_RESOURCE_PORT_WINDOW_DECODE) &&
                     ResourceDescriptor->u.Port.Length != 0 &&
-                    DeviceExtension->IoWindowCount < PCI_MAX_ADDRESS_WINDOWS)
+                    DeviceExtension->IoWindowCount < DeviceExtension->IoWindowCapacity)
                 {
                     PPCI_ADDRESS_WINDOW Window = &DeviceExtension->IoWindows[DeviceExtension->IoWindowCount];
                     ULONGLONG Length = ResourceDescriptor->u.Port.Length;
@@ -572,7 +753,7 @@ FdoStartDevice(
             case CmResourceTypeMemory:
                 if ((ResourceDescriptor->Flags & CM_RESOURCE_MEMORY_WINDOW_DECODE) &&
                     PciMemoryDescriptorLength(ResourceDescriptor) != 0 &&
-                    DeviceExtension->MemoryWindowCount < PCI_MAX_ADDRESS_WINDOWS)
+                    DeviceExtension->MemoryWindowCount < DeviceExtension->MemoryWindowCapacity)
                 {
                     PPCI_ADDRESS_WINDOW Window = &DeviceExtension->MemoryWindows[DeviceExtension->MemoryWindowCount];
                     ULONGLONG Length = PciMemoryDescriptorLength(ResourceDescriptor);
@@ -638,6 +819,8 @@ FdoStartDevice(
         &DriverExtension->BusListHead,
         &DeviceExtension->ListEntry,
         &DriverExtension->BusListLock);
+
+    FdoRegisterSlotNotifications(DeviceExtension);
 
   Irp->IoStatus.Information = 0;
 
@@ -781,12 +964,25 @@ FdoPnpControl(
 
         case IRP_MN_REMOVE_DEVICE:
             PciBeginStateTransition(DeviceExtension, PciDeleted);
+            FdoUnregisterSlotNotifications(DeviceExtension);
+            if (DeviceExtension->ListEntry.Flink != NULL)
+            {
+                KIRQL OldIrql;
+
+                KeAcquireSpinLock(&DriverExtension->BusListLock, &OldIrql);
+                RemoveEntryList(&DeviceExtension->ListEntry);
+                KeReleaseSpinLock(&DriverExtension->BusListLock, OldIrql);
+            }
             PciDestroyFdoArbiters(DeviceExtension);
             IoReleaseRemoveLockAndWait(&DeviceExtension->RemoveLock, Irp);
             Irp->IoStatus.Status = STATUS_SUCCESS;
             IoSkipCurrentIrpStackLocation(Irp);
             Status = IoCallDriver(DeviceExtension->Ldo, Irp);
             IoDetachDevice(DeviceExtension->Ldo);
+            if (DeviceExtension->IoWindows != NULL)
+                ExFreePoolWithTag(DeviceExtension->IoWindows, TAG_PCI);
+            if (DeviceExtension->MemoryWindows != NULL)
+                ExFreePoolWithTag(DeviceExtension->MemoryWindows, TAG_PCI);
             IoDeleteDevice(DeviceObject);
             return Status;
 

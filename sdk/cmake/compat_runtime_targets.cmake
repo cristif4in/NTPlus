@@ -35,6 +35,7 @@ set(COMPAT_RUNTIME_MODULES
     cryptsp
     cryptui
     d3dwine
+    dbgcore
     dbghelp
     d3d10
     d3d10_1
@@ -143,6 +144,7 @@ set(COMPAT_RUNTIME_MODULES
     psapi
     qmgrprxy
     rasadhlp
+    rasapi32
     riched20
     riched32
     rpcrt4
@@ -150,6 +152,7 @@ set(COMPAT_RUNTIME_MODULES
     rtworkq
     samlib
     schannel
+    scrrun
     sechost
     secur32
     sensapi
@@ -169,6 +172,7 @@ set(COMPAT_RUNTIME_MODULES
     sxs
     taskschd
     twinapi
+    tzres
     ucrtbase
     uiautomationcore
     urlmon
@@ -196,6 +200,7 @@ set(COMPAT_RUNTIME_MODULES
     winsta
     wintrust
     wkscli
+    wlanapi
     wldap32
     ws2_32
     ws2help

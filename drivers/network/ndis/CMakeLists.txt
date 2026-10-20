@@ -38,20 +38,32 @@ list(APPEND SOURCE
 # the NDIS 6.20 view of ndis.h. They live outside the precompiled header
 # because the PCH is built at NDIS 5.1 level. The dev-nt6-1 branch splits
 # the NDIS 6 work across several files for clarity:
-#   60stubs.c   - filter/protocol registration stubs and Phase 4 datapath
+#   60filterdrv.c - filter driver registration + module lifecycle
+#   60protocol.c  - protocol driver registration + binding lifecycle
+#   60protodata.c - protocol sends, returns and OID requests
+#   60device.c    - NdisRegisterDeviceEx control devices
+#   60config.c    - NdisOpenConfigurationEx
 #   60nbl.c     - NBL pool allocation
 #   60io.c      - MMIO/IO port/DMA/shared memory/interrupts
 #   60driver.c  - NdisMRegisterMiniportDriver + AddDevice + attributes
 #   60adapter.c - LOGICAL_ADAPTER lifecycle + MiniportInitializeEx
 #   60oid.c     - Legacy NDIS 5 OID dispatcher for NDIS 6 adapters
 set(NDIS6_SOURCE
-    ndis/60stubs.c
+    ndis/60filterdrv.c
+    ndis/60protocol.c
+    ndis/60protodata.c
+    ndis/60device.c
+    ndis/60config.c
+    ndis/60sriov.c
+    ndis/60idle.c
     ndis/60nbl.c
     ndis/60io.c
     ndis/60driver.c
     ndis/60adapter.c
     ndis/60wdf.c
     ndis/60wdi.c
+    ndis/60wdidata.c
+    ndis/60wdidot11.c
     ndis/60oid.c
     ndis/60thunk_tx.c
     ndis/60thunk_rx.c
@@ -59,7 +71,8 @@ set(NDIS6_SOURCE
     ndis/60util.c
     ndis/60ifprov.c
     ndis/60processor.c
-    include/ndis6_internal.h)
+    include/ndis6_internal.h
+    include/ndis6_wdi.h)
 set_source_files_properties(${NDIS6_SOURCE} PROPERTIES SKIP_PRECOMPILE_HEADERS ON)
 
 add_library(ndis MODULE

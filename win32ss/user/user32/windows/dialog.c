@@ -35,6 +35,7 @@ WINE_DEFAULT_DEBUG_CHANNEL(user32);
 /* MACROS/DEFINITIONS ********************************************************/
 
 #define DF_END  0x0001
+#define DF_ANSIDLGPROC 0x0002
 #define DF_DIALOGACTIVE 0x4000 // ReactOS
 #define GETDLGINFO(hwnd) DIALOG_get_info(hwnd, FALSE)
 #define GET_WORD(ptr)  (*(WORD *)(ptr))
@@ -68,10 +69,9 @@ typedef struct
     short      y;
     short      cx;
     short      cy;
-    UINT       id;
+    UINT_PTR   id;
     LPCWSTR    className;
     LPCWSTR    windowName;
-    BOOL       windowNameFree; // ReactOS
     LPCVOID    data;
 } DLG_CONTROL_INFO;
 
@@ -182,6 +182,59 @@ DIALOGINFO *DIALOG_get_info( HWND hWnd, BOOL create )
     return dlgInfo;
 }
 
+static LONG_PTR DIALOG_MapDlgProc( HWND hwnd, LONG_PTR proc, BOOL ansiproc, BOOL unicode )
+{
+    if (!proc || ansiproc == !unicode) return proc;
+    return NtUserGetCPD( hwnd, UserGetCPDDialog | (ansiproc ? UserGetCPDU2A : UserGetCPDA2U), proc );
+}
+
+static void DIALOG_ResolveCallProc( LONG_PTR *proc, BOOL *ansiproc )
+{
+#ifdef WOW64_I386_RUNTIME
+    ROS_CALLPROCINFO Info;
+
+    if (!NtUserCallTwoParam( (DWORD_PTR)*proc, (DWORD_PTR)&Info, TWOPARAM_ROUTINE_ROS_GETCALLPROCINFO ) ||
+        Info.WindowProc > MAXULONG)
+        return;
+    *proc = (LONG_PTR)Info.WindowProc;
+    *ansiproc = !Info.IsUnicode;
+#else
+    PCALLPROCDATA CallProc = ValidateCallProc( (HANDLE)*proc );
+
+    if (!CallProc) return;
+    *proc = (LONG_PTR)CallProc->pfnClientPrevious;
+    *ansiproc = !(CallProc->wType & UserGetCPDA2U);
+#endif
+}
+
+LONG_PTR DIALOG_GetDlgProc( HWND hwnd, LONG_PTR proc, BOOL unicode )
+{
+    DIALOGINFO *dlgInfo = GETDLGINFO(hwnd);
+
+    if (!dlgInfo) return proc;
+    return DIALOG_MapDlgProc( hwnd, proc, !!(dlgInfo->flags & DF_ANSIDLGPROC), unicode );
+}
+
+BOOL DIALOG_SetDlgProc( HWND hwnd, LONG_PTR proc, BOOL unicode, LONG_PTR *oldproc )
+{
+    DIALOGINFO *dlgInfo = GETDLGINFO(hwnd);
+    BOOL ansiproc = !unicode;
+    BOOL oldansiproc;
+    LONG_PTR ret;
+
+    if (!dlgInfo) return FALSE;
+
+    if (IsCallProcHandle( (WNDPROC)proc ))
+        DIALOG_ResolveCallProc( &proc, &ansiproc );
+
+    oldansiproc = !!(dlgInfo->flags & DF_ANSIDLGPROC);
+    ret = NtUserSetWindowLongPtr( hwnd, DWLP_DLGPROC, proc, !unicode );
+    if (ansiproc) dlgInfo->flags |= DF_ANSIDLGPROC;
+    else dlgInfo->flags &= ~DF_ANSIDLGPROC;
+    *oldproc = DIALOG_MapDlgProc( hwnd, ret, oldansiproc, unicode );
+    return TRUE;
+}
+
 /***********************************************************************
  *           DIALOG_GetControl32
  *
@@ -254,27 +307,16 @@ static const WORD *DIALOG_GetControl32( const WORD *p, DLG_CONTROL_INFO *info,
 
     if (GET_WORD(p) == 0xffff)  /* Is it an integer id? */
     {
-//// ReactOS Rev 6478
-        info->windowName = HeapAlloc( GetProcessHeap(), 0, sizeof(L"#65535") );
-        if (info->windowName != NULL)
-        {
-            wsprintf((LPWSTR)info->windowName, L"#%u", GET_WORD(p + 1));
-            info->windowNameFree = TRUE;
-        }
-        else
-        {
-            info->windowNameFree = FALSE;
-        }
+        info->windowName = MAKEINTRESOURCEW(GET_WORD(p + 1));
         p += 2;
     }
     else
     {
         info->windowName = (LPCWSTR)p;
-        info->windowNameFree = FALSE;
         p += strlenW( info->windowName ) + 1;
     }
 
-    TRACE("    %s %s %ld, %d, %d, %d, %d, %08x, %08x, %08x\n",
+    TRACE("    %s %s %Id, %d, %d, %d, %d, %08x, %08x, %08x\n",
           debugstr_w( info->className ), debugstr_w( info->windowName ),
           info->id, info->x, info->y, info->cx, info->cy,
           info->style, info->exStyle, info->helpId );
@@ -323,8 +365,18 @@ static BOOL DIALOG_CreateControls32( HWND hwnd, LPCSTR template, const DLG_TEMPL
 
         if (unicode)
         {
+            LPCWSTR caption = info.windowName;
+            WCHAR caption_buf[3];
+
+            if (IS_INTRESOURCE(caption) && caption)
+            {
+                caption_buf[0] = 0xffff;
+                caption_buf[1] = PtrToUlong( caption );
+                caption_buf[2] = 0;
+                caption = caption_buf;
+            }
             hwndCtrl = CreateWindowExW( info.exStyle | WS_EX_NOPARENTNOTIFY,
-                                        info.className, info.windowName,
+                                        info.className, caption,
                                         info.style | WS_CHILD,
                                         MulDiv(info.x, dlgInfo->xBaseUnit, 4),
                                         MulDiv(info.y, dlgInfo->yBaseUnit, 8),
@@ -336,7 +388,9 @@ static BOOL DIALOG_CreateControls32( HWND hwnd, LPCSTR template, const DLG_TEMPL
         else
         {
             LPSTR class = (LPSTR)info.className;
-            LPSTR caption = (LPSTR)info.windowName;
+            LPCSTR caption = (LPCSTR)info.windowName;
+            LPSTR caption_tmp = NULL;
+            char caption_buf[4];
 
             if (!IS_INTRESOURCE(class))
             {
@@ -348,12 +402,21 @@ static BOOL DIALOG_CreateControls32( HWND hwnd, LPCSTR template, const DLG_TEMPL
             if (!IS_INTRESOURCE(caption))
             {
                 DWORD len = WideCharToMultiByte( CP_ACP, 0, info.windowName, -1, NULL, 0, NULL, NULL );
-                caption = HeapAlloc( GetProcessHeap(), 0, len );
-                if (caption != NULL)
-                    WideCharToMultiByte( CP_ACP, 0, info.windowName, -1, caption, len, NULL, NULL );
+                caption_tmp = HeapAlloc( GetProcessHeap(), 0, len );
+                if (caption_tmp != NULL)
+                    WideCharToMultiByte( CP_ACP, 0, info.windowName, -1, caption_tmp, len, NULL, NULL );
+                caption = caption_tmp;
+            }
+            else if (caption)
+            {
+                caption_buf[0] = 0xff;
+                caption_buf[1] = PtrToUlong( caption );
+                caption_buf[2] = PtrToUlong( caption ) >> 8;
+                caption_buf[3] = 0;
+                caption = caption_buf;
             }
 
-            if (class != NULL && caption != NULL)
+            if (class != NULL && (caption != NULL || !info.windowName))
             {
                 hwndCtrl = CreateWindowExA( info.exStyle | WS_EX_NOPARENTNOTIFY,
                                             class, caption, info.style | WS_CHILD,
@@ -367,12 +430,7 @@ static BOOL DIALOG_CreateControls32( HWND hwnd, LPCSTR template, const DLG_TEMPL
             else
                 hwndCtrl = NULL;
             if (!IS_INTRESOURCE(class)) HeapFree( GetProcessHeap(), 0, class );
-            if (!IS_INTRESOURCE(caption)) HeapFree( GetProcessHeap(), 0, caption );
-        }
-
-        if (info.windowNameFree)
-        {
-            HeapFree( GetProcessHeap(), 0, (LPVOID)info.windowName );
+            if (caption_tmp) HeapFree( GetProcessHeap(), 0, caption_tmp );
         }
 
         if (!hwndCtrl)
@@ -958,14 +1016,8 @@ static HWND DIALOG_CreateIndirect( HINSTANCE hInst, LPCVOID dlgTemplate,
 
            if (IsWindowEnabled( owner ))
            {
-               HWND captured = NULL;
                disabled_owner = owner;
                EnableWindow( disabled_owner, FALSE );
-
-               captured = GetCapture();
-
-               if (captured)
-                   SendMessageW(captured, WM_CANCELMODE, 0, 0);
            }
         }
         *modal_owner = owner;
@@ -1045,6 +1097,8 @@ static HWND DIALOG_CreateIndirect( HINSTANCE hInst, LPCVOID dlgTemplate,
 
     if (DIALOG_CreateControls32( hwnd, dlgTemplate, &template, hInst, unicode ))
     {
+        HWND capture;
+
         /* Send initialisation messages and set focus */
 
         if (dlgProc)
@@ -1080,6 +1134,9 @@ static HWND DIALOG_CreateIndirect( HINSTANCE hInst, LPCVOID dlgTemplate,
         }
         if (!IsWindow(hwnd))
             return NULL;
+
+        if (modal_owner && (capture = GetCapture()))
+            SendMessageW( capture, WM_CANCELMODE, 0, 0 );
 
 //// ReactOS Rev 30613 & 30644
         if (!(GetWindowLongPtrW( hwnd, GWL_STYLE ) & WS_CHILD))
@@ -1767,7 +1824,7 @@ DefDlgProcA(
 
     SetWindowLongPtrW( hDlg, DWLP_MSGRESULT, 0 );
 
-    if ((dlgproc = (WNDPROC)GetWindowLongPtrW( hDlg, DWLP_DLGPROC )))
+    if ((dlgproc = (WNDPROC)IntGetWindowLong( hDlg, DWLP_DLGPROC, sizeof(LONG_PTR), !(dlgInfo->flags & DF_ANSIDLGPROC) )))
     {
         /* Call dialog procedure */
         result = CallWindowProcA( dlgproc, hDlg, Msg, wParam, lParam );
@@ -1830,7 +1887,7 @@ DefDlgProcW(
 
     SetWindowLongPtrW( hDlg, DWLP_MSGRESULT, 0 );
 
-    if ((dlgproc = (WNDPROC)GetWindowLongPtrW( hDlg, DWLP_DLGPROC )))
+    if ((dlgproc = (WNDPROC)IntGetWindowLong( hDlg, DWLP_DLGPROC, sizeof(LONG_PTR), !(dlgInfo->flags & DF_ANSIDLGPROC) )))
     {
         /* Call dialog procedure */
         result = CallWindowProcW( dlgproc, hDlg, Msg, wParam, lParam );

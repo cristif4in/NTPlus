@@ -82,6 +82,7 @@ struct schan_context
     ULONG req_ctx_attr;
     const CERT_CONTEXT *cert;
     SIZE_T header_size;
+    SIZE_T post_handshake_size;
     enum control_token control_token;
     unsigned int alert_type;
     unsigned int alert_number;
@@ -219,6 +220,7 @@ static void read_config(void)
         { L"TLS 1.0",  SP_PROT_TLS1_0_CLIENT,  SP_PROT_TLS1_0_SERVER,  TRUE, FALSE },
         { L"TLS 1.1",  SP_PROT_TLS1_1_CLIENT,  SP_PROT_TLS1_1_SERVER,  TRUE, FALSE /* NOTE: not enabled by default on Windows */ },
         { L"TLS 1.2",  SP_PROT_TLS1_2_CLIENT,  SP_PROT_TLS1_2_SERVER,  TRUE, FALSE /* NOTE: not enabled by default on Windows */ },
+        { L"TLS 1.3",  SP_PROT_TLS1_3_CLIENT,  SP_PROT_TLS1_3_SERVER,  TRUE, FALSE },
         { L"DTLS 1.0", SP_PROT_DTLS1_0_CLIENT, SP_PROT_DTLS1_0_SERVER, TRUE, TRUE },
         { L"DTLS 1.2", SP_PROT_DTLS1_2_CLIENT, SP_PROT_DTLS1_2_SERVER, TRUE, TRUE },
     };
@@ -470,13 +472,28 @@ static DWORD get_enabled_protocols(const void *credentials)
         return cred_old->grbitEnabledProtocols;
 
     case SCH_CREDENTIALS_VERSION:
-        if (cred->cTlsParameters) FIXME("handle TLS parameters\n");
         return 0;
 
     default:
         FIXME("unhandled version %lu\n", cred->dwVersion);
         return 0;
     }
+}
+
+static DWORD get_disabled_protocols(const void *credentials)
+{
+    const SCH_CREDENTIALS *cred = credentials;
+    DWORD i, disabled = 0;
+
+    if (!cred || cred->dwVersion != SCH_CREDENTIALS_VERSION)
+        return SP_PROT_TLS1_3_CLIENT | SP_PROT_TLS1_3_SERVER;
+
+    for (i = 0; i < cred->cTlsParameters; i++)
+    {
+        if (!cred->pTlsParameters[i].cAlpnIds)
+            disabled |= cred->pTlsParameters[i].grbitDisabledProtocols;
+    }
+    return disabled;
 }
 
 static WCHAR *get_key_container_path(const CERT_CONTEXT *ctx)
@@ -728,6 +745,7 @@ static SECURITY_STATUS acquire_credentials_handle(ULONG fCredentialUse,
         enabled_protocols = cred_enabled_protocols & config_enabled_protocols;
     else
         enabled_protocols = config_enabled_protocols & ~config_default_disabled_protocols;
+    enabled_protocols &= ~get_disabled_protocols(schanCred);
     if (!(fCredentialUse & SECPKG_CRED_OUTBOUND))
         enabled_protocols &= ~SP_PROT_X_CLIENTS;
     if (!(fCredentialUse & SECPKG_CRED_INBOUND))
@@ -921,6 +939,8 @@ static SECURITY_STATUS establish_context(
     int output_buffer_idx = -1;
     int idx, i;
     ULONG input_offset = 0, output_offset = 0;
+    SIZE_T consumed_size = 0;
+    SecBuffer consumed_buffer;
     SecBufferDesc input_desc, output_desc;
 
     if (ptsTimeStamp)
@@ -1028,7 +1048,8 @@ static SECURITY_STATUS establish_context(
         unsigned char *ptr;
 
         if (phContext && !(ctx = schan_get_object(phContext->dwLower, SCHAN_HANDLE_CTX))) return SEC_E_INVALID_HANDLE;
-        if (!pInput && !ctx->control_token && !is_dtls_context(ctx)) return SEC_E_INCOMPLETE_MESSAGE;
+        if (!pInput && !ctx->control_token && !is_dtls_context(ctx) && !ctx->post_handshake_size)
+            return SEC_E_INCOMPLETE_MESSAGE;
 
         if (!ctx->control_token && pInput)
         {
@@ -1087,6 +1108,16 @@ static SECURITY_STATUS establish_context(
         input_desc.pBuffers = &pInput->pBuffers[idx];
     }
 
+    if (ctx->post_handshake_size && input_desc.cBuffers && expected_size >= ctx->post_handshake_size)
+    {
+        consumed_size = ctx->post_handshake_size;
+        consumed_buffer = *input_desc.pBuffers;
+        consumed_buffer.pvBuffer = (BYTE *)consumed_buffer.pvBuffer + consumed_size;
+        consumed_buffer.cbBuffer -= consumed_size;
+        input_desc.pBuffers = &consumed_buffer;
+    }
+    ctx->post_handshake_size = 0;
+
     memset(&output_desc, 0, sizeof(output_desc));
     idx = schan_find_sec_buffer_idx(pOutput, 0, SECBUFFER_TOKEN);
     if (idx == -1)
@@ -1106,7 +1137,7 @@ static SECURITY_STATUS establish_context(
 
     params.session = ctx->session;
     params.input = pInput ? &input_desc : NULL;
-    params.input_size = expected_size;
+    params.input_size = expected_size - consumed_size;
     params.output = &output_desc;
     params.input_offset = &input_offset;
     params.output_buffer_idx = &output_buffer_idx;
@@ -1116,6 +1147,7 @@ static SECURITY_STATUS establish_context(
     params.alert_number = ctx->alert_number;
     ctx->control_token = CONTROL_TOKEN_NONE;
     ret = GNUTLS_CALL( handshake, &params );
+    input_offset += consumed_size;
 
     if (output_buffer_idx != -1)
     {
@@ -1718,7 +1750,12 @@ static SECURITY_STATUS SEC_ENTRY schan_DecryptMessage(PCtxtHandle context_handle
     schan_decrypt_fill_buffer(message, SECBUFFER_STREAM_TRAILER,
         buf_ptr + ctx->header_size + received, buffer->cbBuffer - ctx->header_size - received);
 
-    if(buffer->cbBuffer > expected_size)
+    if (status == SEC_I_RENEGOTIATE)
+    {
+        ctx->post_handshake_size = expected_size;
+        schan_decrypt_fill_buffer(message, SECBUFFER_EXTRA, buf_ptr, buffer->cbBuffer);
+    }
+    else if(buffer->cbBuffer > expected_size)
         schan_decrypt_fill_buffer(message, SECBUFFER_EXTRA,
             buf_ptr + expected_size, buffer->cbBuffer - expected_size);
 

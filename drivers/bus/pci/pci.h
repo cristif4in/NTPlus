@@ -74,6 +74,7 @@ typedef struct _PCI_DEVICE
     ULONG SavedMsixEntries;
     PVOID SavedMsixTable;
     BOOLEAN SleepStateSaved;
+    BOOLEAN Reported;
 } PCI_DEVICE, *PPCI_DEVICE;
 
 
@@ -145,8 +146,6 @@ typedef struct _PCI_ROOT_BUS_INTERFACE
     ULONG MaxBus;
 } PCI_ROOT_BUS_INTERFACE, *PPCI_ROOT_BUS_INTERFACE;
 
-#define PCI_MAX_ADDRESS_WINDOWS 8
-
 typedef struct _PCI_ADDRESS_WINDOW
 {
     ULONGLONG Start;
@@ -173,9 +172,11 @@ typedef struct _FDO_DEVICE_EXTENSION
     ULONG BusRangeEnd;
     // Address apertures decoded by this bus, supplied by ACPI or its parent bridge
     ULONG IoWindowCount;
-    PCI_ADDRESS_WINDOW IoWindows[PCI_MAX_ADDRESS_WINDOWS];
+    ULONG IoWindowCapacity;
+    PPCI_ADDRESS_WINDOW IoWindows;
     ULONG MemoryWindowCount;
-    PCI_ADDRESS_WINDOW MemoryWindows[PCI_MAX_ADDRESS_WINDOWS];
+    ULONG MemoryWindowCapacity;
+    PPCI_ADDRESS_WINDOW MemoryWindows;
     // Remove lock for PnP IRP serialization
     IO_REMOVE_LOCK RemoveLock;
     // Current state of the driver
@@ -199,6 +200,8 @@ typedef struct _FDO_DEVICE_EXTENSION
     KSPIN_LOCK DeviceListLock;
     // Lower device object
     PDEVICE_OBJECT Ldo;
+    PDEVICE_OBJECT PhysicalDeviceObject;
+    LIST_ENTRY SlotNotifyListHead;
     // Resource arbiter list (I/O, Memory, BusNumber)
     LIST_ENTRY ArbiterListHead;
     // System power state tracking
@@ -210,6 +213,18 @@ typedef struct _FDO_DEVICE_EXTENSION
     KSPIN_LOCK WaitWakeSpinLock;
     LONG WaitWakeChildCount;
 } FDO_DEVICE_EXTENSION, *PFDO_DEVICE_EXTENSION;
+
+#define PCI_ACPI_NOTIFY_BUS_CHECK 0x00
+#define PCI_ACPI_NOTIFY_DEVICE_CHECK 0x01
+#define PCI_ACPI_NOTIFY_EJECT_REQUEST 0x03
+
+typedef struct _PCI_SLOT_NOTIFY
+{
+    LIST_ENTRY ListEntry;
+    PFDO_DEVICE_EXTENSION FdoExtension;
+    ULONG DeviceNumber;
+    ACPI_INTERFACE_STANDARD2 Interface;
+} PCI_SLOT_NOTIFY, *PPCI_SLOT_NOTIFY;
 
 static __inline BOOLEAN
 PciIsBusInRange(
@@ -387,6 +402,14 @@ PciAcpiQueryChildNotifyInterface(
 
 NTSTATUS
 PciAcpiQueryNotifyInterface(
+    _In_ ULONG Segment,
+    _In_ ULONG Bus,
+    _In_ ULONG Device,
+    _In_ ULONG Function,
+    _Out_ PACPI_INTERFACE_STANDARD2 Interface);
+
+NTSTATUS
+PciAcpiQuerySlotNotifyInterface(
     _In_ ULONG Segment,
     _In_ ULONG Bus,
     _In_ ULONG Device,

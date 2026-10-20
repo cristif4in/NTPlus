@@ -907,8 +907,17 @@ SoftModalMessageBox(IN LPMSGBOXDATA lpMsgBoxData)
     tpl = (DLGTEMPLATE *)buf;
 
     tpl->style = WS_CAPTION | WS_POPUP | WS_VISIBLE | WS_CLIPSIBLINGS | WS_SYSMENU |
-                 DS_CENTER | DS_SETFONT | DS_MODALFRAME | DS_NOIDLEMSG;
-    tpl->dwExtendedStyle = WS_EX_DLGMODALFRAME | WS_EX_WINDOWEDGE | WS_EX_CONTROLPARENT;
+                 DS_CENTER | DS_SETFONT | DS_NOIDLEMSG;
+    tpl->dwExtendedStyle = WS_EX_WINDOWEDGE | WS_EX_CONTROLPARENT;
+    if ((lpMsgBoxParams->dwStyle & (MB_SYSTEMMODAL | MB_TASKMODAL)) == MB_SYSTEMMODAL)
+    {
+        tpl->dwExtendedStyle |= WS_EX_TOPMOST;
+    }
+    else
+    {
+        tpl->style |= DS_MODALFRAME;
+        tpl->dwExtendedStyle |= WS_EX_DLGMODALFRAME;
+    }
     if (lpMsgBoxParams->dwStyle & MB_TOPMOST)
         tpl->dwExtendedStyle |= WS_EX_TOPMOST;
     if (lpMsgBoxParams->dwStyle & MB_RIGHT)
@@ -1050,9 +1059,12 @@ SoftModalMessageBox(IN LPMSGBOXDATA lpMsgBoxData)
         WARN("MessageBox: %s\n", wine_dbgstr_wn(lpMsgBoxParams->lpszText, textlen));
     else
         TRACE("MessageBox: %s\n", wine_dbgstr_wn(lpMsgBoxParams->lpszText, textlen));
+    NtUserModifyUserStartupInfoFlags(STARTF_USESHOWWINDOW, 0);
     ret = DialogBoxIndirectParamW(lpMsgBoxParams->hInstance, tpl,
                                   lpMsgBoxParams->hwndOwner,
                                   MessageBoxProc, (LPARAM)&mbd);
+    if (ret == -1)
+        ret = 0;
 
 Quit:
     if (buf)

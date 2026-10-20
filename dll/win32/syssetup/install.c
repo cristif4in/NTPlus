@@ -25,6 +25,7 @@
 #include <rpcproxy.h>
 #include <ndk/cmfuncs.h>
 #include <reactos/bootstatus.h>
+#include <strsafe.h>
 
 #define NDEBUG
 #include <debug.h>
@@ -456,7 +457,8 @@ InstallSysSetupInfDevices(VOID)
 }
 
 BOOL
-InstallSysSetupInfComponents(VOID)
+InstallSysSetupInfComponents(
+    _In_ UINT Flags)
 {
     INFCONTEXT InfContext;
     WCHAR szNameBuffer[256];
@@ -510,7 +512,7 @@ InstallSysSetupInfComponents(VOID)
             if (!SetupInstallFromInfSectionW(NULL,
                                              hComponentInf,
                                              szSectionBuffer,
-                                             SPINST_ALL,
+                                             Flags,
                                              NULL,
                                              NULL,
                                              SP_COPY_NEWER,
@@ -533,6 +535,59 @@ InstallSysSetupInfComponents(VOID)
 }
 
 
+
+static HANDLE hWow64Registration = NULL;
+static DWORD Wow64RegistrationTimeout;
+
+VOID
+StartWow64Registration(VOID)
+{
+    WCHAR Wow64Dir[MAX_PATH], WindowsDir[MAX_PATH], Rundll32[MAX_PATH], CommandLine[3 * MAX_PATH];
+    PROCESS_INFORMATION ProcessInformation;
+    STARTUPINFOW StartupInfo;
+    LONG Count;
+
+    if (hWow64Registration)
+        return;
+    if (!GetSystemWow64DirectoryW(Wow64Dir, ARRAYSIZE(Wow64Dir)) ||
+        !GetWindowsDirectoryW(WindowsDir, ARRAYSIZE(WindowsDir)))
+    {
+        return;
+    }
+    if (FAILED(StringCchPrintfW(Rundll32, ARRAYSIZE(Rundll32), L"%s\\rundll32.exe", Wow64Dir)) ||
+        GetFileAttributesW(Rundll32) == INVALID_FILE_ATTRIBUTES ||
+        FAILED(StringCchPrintfW(CommandLine, ARRAYSIZE(CommandLine),
+                                L"\"%s\" setupapi.dll,InstallHinfSection Wow64Registration 128 %s\\inf\\syssetup.inf",
+                                Rundll32, WindowsDir)))
+    {
+        return;
+    }
+
+    ZeroMemory(&StartupInfo, sizeof(StartupInfo));
+    StartupInfo.cb = sizeof(StartupInfo);
+    if (!CreateProcessW(Rundll32, CommandLine, NULL, NULL, FALSE, CREATE_NO_WINDOW, NULL, NULL,
+                        &StartupInfo, &ProcessInformation))
+    {
+        DPRINT1("Could not start the 32-bit registration (Error %lu)\n", GetLastError());
+        return;
+    }
+    CloseHandle(ProcessInformation.hThread);
+    hWow64Registration = ProcessInformation.hProcess;
+
+    Count = SetupGetLineCountW(hSysSetupInf, L"Wow64RegisterDlls");
+    Wow64RegistrationTimeout = 60000 * max(Count, 0);
+}
+
+VOID
+WaitWow64Registration(VOID)
+{
+    if (!hWow64Registration)
+        return;
+    if (WaitForSingleObject(hWow64Registration, Wow64RegistrationTimeout) != WAIT_OBJECT_0)
+        DPRINT1("The 32-bit registration did not finish\n");
+    CloseHandle(hWow64Registration);
+    hWow64Registration = NULL;
+}
 
 BOOL
 RegisterTypeLibraries(
@@ -605,6 +660,14 @@ RegisterTypeLibraries(
     return TRUE;
 }
 
+static SERVICE_NOTIFYW PnpServiceNotify;
+
+static VOID CALLBACK
+PnpServiceStatusChanged(PVOID pParameter)
+{
+    UNREFERENCED_PARAMETER(pParameter);
+}
+
 static BOOL
 EnableUserModePnpManager(VOID)
 {
@@ -650,6 +713,13 @@ EnableUserModePnpManager(VOID)
         goto cleanup;
     }
 
+    PnpServiceNotify.dwVersion = SERVICE_NOTIFY_STATUS_CHANGE;
+    PnpServiceNotify.pfnNotifyCallback = PnpServiceStatusChanged;
+    NotifyServiceStatusChangeW(hService,
+                               SERVICE_NOTIFY_STOPPED | SERVICE_NOTIFY_STOP_PENDING | SERVICE_NOTIFY_RUNNING |
+                               SERVICE_NOTIFY_CONTINUE_PENDING | SERVICE_NOTIFY_PAUSE_PENDING | SERVICE_NOTIFY_PAUSED,
+                               &PnpServiceNotify);
+
     while (TRUE)
     {
         bRet = QueryServiceStatusEx(hService,
@@ -669,7 +739,7 @@ EnableUserModePnpManager(VOID)
         WaitTime = ServiceStatus.dwWaitHint / 10;
         if (WaitTime < 1000) WaitTime = 1000;
         else if (WaitTime > 10000) WaitTime = 10000;
-        Sleep(WaitTime);
+        SleepEx(WaitTime, TRUE);
     };
 
     if (ServiceStatus.dwCurrentState != SERVICE_RUNNING)
@@ -1039,7 +1109,7 @@ CommonInstall(VOID)
                            0,
                            0);
 
-    if (!InstallSysSetupInfComponents())
+    if (!InstallSysSetupInfComponents(SPINST_ALL & ~SPINST_REGSVR))
     {
         HideDeviceBootStatus(StatusWindow);
         FatalError("InstallSysSetupInfComponents() failed!\n");

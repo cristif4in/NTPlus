@@ -257,6 +257,7 @@ VOID NTAPI AcpiInterfaceNotificationsUnregister(PDEVICE_OBJECT Context, PDEVICE_
 BOOLEAN AcpiHardwareIdContains(PPDO_DEVICE_DATA DeviceData, PCWSTR HardwareId);
 ACPI_STATUS BuspGetCurrentResources(_In_ ACPI_HANDLE Handle, _Inout_ ACPI_BUFFER *Buffer);
 ACPI_STATUS BuspGetPossibleResources(_In_ ACPI_HANDLE Handle, _Inout_ ACPI_BUFFER *Buffer);
+ACPI_STATUS BuspSetCurrentResources(_In_ ACPI_HANDLE Handle, _In_ ACPI_BUFFER *Buffer);
 ACPI_STATUS BuspGetIrqRoutingTable(_In_ ACPI_HANDLE Handle, _Inout_ ACPI_BUFFER *Buffer);
 ACPI_STATUS BuspWalkResources(_In_ ACPI_HANDLE Handle, _In_ char *Name, _In_ ACPI_WALK_RESOURCE_CALLBACK Callback, _In_opt_ void *Context);
 struct acpi_device;
@@ -267,6 +268,7 @@ VOID AcpiWakeRemoveDevice(struct acpi_device *Device);
 VOID AcpiWakeQueryCapabilities(struct acpi_device *Device, PDEVICE_CAPABILITIES Capabilities);
 NTSTATUS AcpiWakeQueueIrp(PPDO_DEVICE_DATA PdoData, PIRP Irp);
 VOID AcpiWakeSignal(ACPI_HANDLE Handle);
+VOID AcpiPciSlotNotify(ACPI_HANDLE Handle, UINT32 Value);
 VOID AcpiWakeCancelDevice(ACPI_HANDLE Handle);
 VOID AcpiWakeCheckSources(VOID);
 NTSTATUS AcpiQueryWakeForPciDeviceIoctl(PIRP Irp);

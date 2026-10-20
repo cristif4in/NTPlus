@@ -43,6 +43,19 @@ BuspGetPossibleResources(
 }
 
 ACPI_STATUS
+BuspSetCurrentResources(
+    _In_ ACPI_HANDLE Handle,
+    _In_ ACPI_BUFFER *Buffer)
+{
+    ACPI_STATUS Status;
+
+    KeAcquireGuardedMutex(&BuspResourceLock);
+    Status = AcpiSetCurrentResources(Handle, Buffer);
+    KeReleaseGuardedMutex(&BuspResourceLock);
+    return Status;
+}
+
+ACPI_STATUS
 BuspGetIrqRoutingTable(
     _In_ ACPI_HANDLE Handle,
     _Inout_ ACPI_BUFFER *Buffer)
@@ -558,7 +571,8 @@ ACPIDispatchInternalDeviceControl(
 
     Irp->IoStatus.Information = 0;
     if (CommonData != NULL && CommonData->IsFDO &&
-        IrpSp->Parameters.DeviceIoControl.IoControlCode == IOCTL_ACPI_QUERY_PCI_NOTIFY_INTERFACE)
+        (IrpSp->Parameters.DeviceIoControl.IoControlCode == IOCTL_ACPI_QUERY_PCI_NOTIFY_INTERFACE ||
+         IrpSp->Parameters.DeviceIoControl.IoControlCode == IOCTL_ACPI_QUERY_PCI_SLOT_NOTIFY_INTERFACE))
     {
         Status = AcpiQueryPciNotifyInterfaceIoctl(Irp, IrpSp);
     }

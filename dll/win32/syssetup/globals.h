@@ -70,7 +70,8 @@ BOOL
 InstallSysSetupInfDevices(VOID);
 
 BOOL
-InstallSysSetupInfComponents(VOID);
+InstallSysSetupInfComponents(
+    _In_ UINT Flags);
 
 BOOL
 InitializeProgramFilesDir(VOID);
@@ -80,6 +81,12 @@ InitializeDefaultUserLocale(VOID);
 
 DWORD
 SaveDefaultUserHive(VOID);
+
+VOID
+StartWow64Registration(VOID);
+
+VOID
+WaitWow64Registration(VOID);
 
 BOOL
 RegisterTypeLibraries(

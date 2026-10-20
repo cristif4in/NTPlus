@@ -248,11 +248,16 @@ DefWndHandleSysCommand(HWND hWnd, WPARAM wParam, LPARAM lParam)
         break;
     }
 
+#ifdef WOW64_I386_RUNTIME
+  NtUserMessageCall(hWnd, WM_SYSCOMMAND, wParam, lParam, (ULONG_PTR)&lResult, FNID_DEFWINDOWPROC, FALSE);
+  if (lResult) return 0;
+#else
   if (ISITHOOKED(WH_CBT))
   {
      NtUserMessageCall(hWnd, WM_SYSCOMMAND, wParam, lParam, (ULONG_PTR)&lResult, FNID_DEFWINDOWPROC, FALSE);
      if (lResult) return 0;
   }
+#endif
 
   switch (wParam & 0xfff0)
     {
@@ -367,6 +372,32 @@ UserPaintCaption(PWND pwnd, INT Flags)
   //NtUserCallTwoParam((DWORD_PTR)UserHMGetHandle(pwnd),Flags,TWOPARAM_ROUTINE_REDRAWTITLE)
 }
 
+#ifdef WOW64_I386_RUNTIME
+static VOID
+IntPaintCaptionHwnd(HWND hWnd, INT Flags)
+{
+    ROS_WINDOWINFO Info;
+
+    if (!NtUserCallHwndParam(hWnd, (DWORD_PTR)&Info, HWNDPARAM_ROUTINE_ROS_GETWINDOWINFO))
+        return;
+    if (!(Info.style & WS_VISIBLE) || (Info.style & WS_CAPTION) != WS_CAPTION)
+        return;
+    if (Info.state & WNDS_HASCAPTION && NtUserQueryWindow(hWnd, QUERY_WINDOW_FOREGROUND))
+        Flags |= DC_ACTIVE;
+    if (UserGetServerInfo(dwSRVIFlags, ROS_SERVERINFO_SRVIFLAGS) & SRVINFO_APIHOOK)
+    {
+        DefWindowProcW(hWnd, WM_NCUAHDRAWCAPTION, Flags, 0);
+    }
+    else
+    {
+        RECT rc = {0,0,0,0};
+        HDC hDC = GetDCEx(hWnd, NULL, DCX_WINDOW|DCX_USESTYLE);
+        NtUserDrawCaption(hWnd, hDC, &rc, DC_DRAWCAPTIONMD|Flags);
+        ReleaseDC(hWnd, hDC);
+    }
+}
+#endif
+
 LRESULT FASTCALL
 DefWndGetIcon(PWND pWnd, WPARAM wParam, LPARAM lParam)
 {
@@ -391,6 +422,27 @@ DefWndGetIcon(PWND pWnd, WPARAM wParam, LPARAM lParam)
     return (LRESULT)hIconRet;
 }
 
+#ifdef WOW64_I386_RUNTIME
+static BOOL
+IntIsHwndDefWndMessage(UINT Msg)
+{
+    switch (Msg)
+    {
+        case WM_VKEYTOITEM:
+        case WM_CHARTOITEM:
+        case WM_QUERYDROPOBJECT:
+        case WM_QUERYDRAGICON:
+        case WM_NOTIFYFORMAT:
+        case WM_QUERYOPEN:
+        case WM_QUERYENDSESSION:
+        case WM_INPUTLANGCHANGEREQUEST:
+        case WM_INPUTLANGCHANGE:
+        case WM_COPYGLOBALDATA:
+            return TRUE;
+    }
+    return FALSE;
+}
+#endif
 
 LRESULT WINAPI
 User32DefWindowProc(HWND hWnd,
@@ -404,7 +456,9 @@ User32DefWindowProc(HWND hWnd,
     {
        pWnd = ValidateHwnd(hWnd);
 #ifdef WOW64_I386_RUNTIME
-       if (!pWnd && Msg != WM_GETTITLEBARINFOEX) return 0;
+       if (!pWnd && Msg != WM_GETTITLEBARINFOEX &&
+           !(IntIsHwndDefWndMessage(Msg) && IsWindow(hWnd)))
+           return 0;
 #else
        if (!pWnd) return 0;
 #endif
@@ -1019,6 +1073,28 @@ GoSS:
 
 
 #ifdef WOW64_I386_RUNTIME
+static VOID
+DefWndInitScrollBars(HWND hWnd)
+{
+    LONG Style = GetWindowLongW(hWnd, GWL_STYLE);
+    SCROLLINFO Probe = {sizeof(Probe), SIF_RANGE};
+    SCROLLINFO si = {sizeof si, SIF_ALL, 0, 100, 0, 0, 0};
+    DWORD Error;
+
+    if (!(Style & (WS_HSCROLL | WS_VSCROLL)))
+        return;
+
+    Error = GetLastError();
+    if (NtUserSBGetParms(hWnd, SB_HORZ, NULL, &Probe))
+        return;
+    SetLastError(Error);
+
+    if (Style & WS_HSCROLL)
+        SetScrollInfo(hWnd, SB_HORZ, &si, FALSE);
+    if (Style & WS_VSCROLL)
+        SetScrollInfo(hWnd, SB_VERT, &si, FALSE);
+}
+
 static BOOL
 IntIsClientDefWndMessage(UINT Msg)
 {
@@ -1062,15 +1138,19 @@ RealDefWindowProcA(HWND hWnd,
 #ifdef WOW64_I386_RUNTIME
     if (!Wnd && Msg == WM_SETTEXT)
     {
-        Result = DefSetText(hWnd, (PCWSTR)lParam, TRUE);
-        if (Result) RedrawWindow(hWnd, NULL, 0, RDW_INVALIDATE | RDW_FRAME | RDW_ERASE);
-        return Result;
+        DefSetText(hWnd, (PCWSTR)lParam, TRUE);
+        IntPaintCaptionHwnd(hWnd, DC_TEXT);
+        IntNotifyWinEvent(EVENT_OBJECT_NAMECHANGE, hWnd, OBJID_WINDOW, CHILDID_SELF, 0);
+        return 1;
     }
 
     if (!Wnd && Msg == WM_WINDOWPOSCHANGED)
         return DefWndHandleWindowPosChanged(hWnd, (const WINDOWPOS *)lParam);
 
-    if (!Wnd && Msg != WM_NCCREATE && !IntIsClientDefWndMessage(Msg))
+    if (!Wnd && Msg == WM_SYSCOMMAND)
+        return DefWndHandleSysCommand(hWnd, wParam, lParam);
+
+    if (!Wnd && Msg != WM_NCCREATE && !IntIsClientDefWndMessage(Msg) && !IntIsHwndDefWndMessage(Msg))
     {
         NtUserMessageCall(hWnd, Msg, wParam, lParam, (ULONG_PTR)&Result, FNID_DEFWINDOWPROC, TRUE);
         return Result;
@@ -1089,6 +1169,10 @@ RealDefWindowProcA(HWND hWnd,
     {
         case WM_NCCREATE:
         {
+#ifdef WOW64_I386_RUNTIME
+            if (!Wnd)
+                DefWndInitScrollBars(hWnd);
+#endif
             if ( Wnd &&
                  Wnd->style & (WS_HSCROLL | WS_VSCROLL) )
             {
@@ -1310,15 +1394,19 @@ RealDefWindowProcW(HWND hWnd,
 #ifdef WOW64_I386_RUNTIME
     if (!Wnd && Msg == WM_SETTEXT)
     {
-        Result = DefSetText(hWnd, (PCWSTR)lParam, FALSE);
-        if (Result) RedrawWindow(hWnd, NULL, 0, RDW_INVALIDATE | RDW_FRAME | RDW_ERASE);
-        return Result;
+        DefSetText(hWnd, (PCWSTR)lParam, FALSE);
+        IntPaintCaptionHwnd(hWnd, DC_TEXT);
+        IntNotifyWinEvent(EVENT_OBJECT_NAMECHANGE, hWnd, OBJID_WINDOW, CHILDID_SELF, 0);
+        return 1;
     }
 
     if (!Wnd && Msg == WM_WINDOWPOSCHANGED)
         return DefWndHandleWindowPosChanged(hWnd, (const WINDOWPOS *)lParam);
 
-    if (!Wnd && Msg != WM_NCCREATE && !IntIsClientDefWndMessage(Msg))
+    if (!Wnd && Msg == WM_SYSCOMMAND)
+        return DefWndHandleSysCommand(hWnd, wParam, lParam);
+
+    if (!Wnd && Msg != WM_NCCREATE && !IntIsClientDefWndMessage(Msg) && !IntIsHwndDefWndMessage(Msg))
     {
         NtUserMessageCall(hWnd, Msg, wParam, lParam, (ULONG_PTR)&Result, FNID_DEFWINDOWPROC, FALSE);
         return Result;
@@ -1337,6 +1425,10 @@ RealDefWindowProcW(HWND hWnd,
     {
         case WM_NCCREATE:
         {
+#ifdef WOW64_I386_RUNTIME
+            if (!Wnd)
+                DefWndInitScrollBars(hWnd);
+#endif
             if ( Wnd &&
                  Wnd->style & (WS_HSCROLL | WS_VSCROLL) )
             {

@@ -105,6 +105,11 @@ NTAPI
 IopGetBusTypeGuidIndex(LPGUID BusTypeGuid);
 
 NTSTATUS
+NTAPI
+PnpBusTypeGuidGet(IN USHORT Index,
+                  IN LPGUID BusTypeGuid);
+
+NTSTATUS
 IopSetDeviceInstanceData(HANDLE InstanceKey, PDEVICE_NODE DeviceNode);
 
 BOOLEAN
@@ -1212,6 +1217,35 @@ Cleanup:
     return Status;
 }
 
+static
+VOID
+PiUpdateRemovalPolicy(
+    _In_ PDEVICE_NODE DeviceNode)
+{
+    DEVICE_REMOVAL_POLICY Policy = RemovalPolicyExpectNoRemoval;
+    GUID BusTypeGuid;
+
+    if (DeviceNode->CapabilityFlags & 0x00000004)
+    {
+        Policy = RemovalPolicyExpectOrderlyRemoval;
+        if (NT_SUCCESS(PnpBusTypeGuidGet(DeviceNode->ChildBusTypeIndex, &BusTypeGuid)) &&
+            (IsEqualGUID(&BusTypeGuid, &GUID_BUS_TYPE_USB) ||
+             IsEqualGUID(&BusTypeGuid, &GUID_BUS_TYPE_1394) ||
+             IsEqualGUID(&BusTypeGuid, &GUID_BUS_TYPE_PCMCIA)))
+        {
+            Policy = RemovalPolicyExpectSurpriseRemoval;
+        }
+    }
+    else if (DeviceNode->Parent != NULL &&
+             DeviceNode->Parent->HardwareRemovalPolicy > RemovalPolicyExpectNoRemoval)
+    {
+        Policy = DeviceNode->Parent->HardwareRemovalPolicy;
+    }
+
+    DeviceNode->HardwareRemovalPolicy = (UCHAR)Policy;
+    DeviceNode->RemovalPolicy = (UCHAR)Policy;
+}
+
 NTSTATUS
 NTAPI
 IopQueryDeviceCapabilities(PDEVICE_NODE DeviceNode,
@@ -1284,6 +1318,8 @@ IopQueryDeviceCapabilities(PDEVICE_NODE DeviceNode,
         DeviceNode->UserFlags |= DNUF_DONT_SHOW_IN_UI;
     else
         DeviceNode->UserFlags &= ~DNUF_DONT_SHOW_IN_UI;
+
+    PiUpdateRemovalPolicy(DeviceNode);
 
     Status = IopCreateDeviceKeyPath(&DeviceNode->InstancePath, REG_OPTION_NON_VOLATILE, &InstanceKey);
     if (NT_SUCCESS(Status))
@@ -1776,6 +1812,8 @@ PiInitializeDevNode(
         DeviceNode->ChildBusTypeIndex = -1;
     }
 
+    PiUpdateRemovalPolicy(DeviceNode);
+
     PiQueryDevNodeResources(DeviceNode);
 
     if (InstanceKey != NULL)
@@ -2201,6 +2239,26 @@ IopUpdateResourceMapForPnPDevice(
 
 static
 VOID
+PiSetDeviceStackRemovePending(
+    _In_ PDEVICE_OBJECT PhysicalDeviceObject,
+    _In_ BOOLEAN RemovePending)
+{
+    PDEVICE_OBJECT Device;
+    KIRQL OldIrql;
+
+    OldIrql = KeAcquireQueuedSpinLock(LockQueueIoDatabaseLock);
+    for (Device = PhysicalDeviceObject; Device != NULL; Device = Device->AttachedDevice)
+    {
+        if (RemovePending)
+            IoGetDevObjExtension(Device)->ExtensionFlags |= DOE_REMOVE_PENDING;
+        else
+            IoGetDevObjExtension(Device)->ExtensionFlags &= ~DOE_REMOVE_PENDING;
+    }
+    KeReleaseQueuedSpinLock(LockQueueIoDatabaseLock, OldIrql);
+}
+
+static
+VOID
 NTAPI
 IopSendRemoveDevice(IN PDEVICE_OBJECT DeviceObject)
 {
@@ -2214,6 +2272,8 @@ IopSendRemoveDevice(IN PDEVICE_OBJECT DeviceObject)
 
     /* Drivers should never fail a IRP_MN_REMOVE_DEVICE request */
     PiIrpSendRemoveCheckVpb(DeviceObject, IRP_MN_REMOVE_DEVICE);
+    PiSetDeviceStackRemovePending(DeviceObject, FALSE);
+    IopDisableDeviceInterfaces(DeviceNode);
 
     /* Keep the owner-aware database and RESOURCEMAP in sync. */
     IopResDbRelease(DeviceNode);
@@ -2294,6 +2354,7 @@ IopSendSurpriseRemoval(IN PDEVICE_OBJECT DeviceObject)
     ASSERT(IopGetDeviceNode(DeviceObject)->State == DeviceNodeAwaitingQueuedRemoval);
     /* Drivers should never fail a IRP_MN_SURPRISE_REMOVAL request */
     PiIrpSendRemoveCheckVpb(DeviceObject, IRP_MN_SURPRISE_REMOVAL);
+    PiSetDeviceStackRemovePending(DeviceObject, TRUE);
 }
 
 static
@@ -2305,29 +2366,6 @@ IopCancelRemoveDevice(IN PDEVICE_OBJECT DeviceObject)
     PiIrpSendRemoveCheckVpb(DeviceObject, IRP_MN_CANCEL_REMOVE_DEVICE);
 
     PiNotifyTargetDeviceChange(&GUID_TARGET_DEVICE_REMOVE_CANCELLED, DeviceObject, NULL);
-}
-
-static
-VOID
-IopCancelRemoveChildDevices(PDEVICE_NODE ParentDeviceNode)
-{
-    PDEVICE_NODE ChildDeviceNode, NextDeviceNode;
-    KIRQL OldIrql;
-
-    KeAcquireSpinLock(&IopDeviceTreeLock, &OldIrql);
-    ChildDeviceNode = ParentDeviceNode->Child;
-    while (ChildDeviceNode != NULL)
-    {
-        NextDeviceNode = ChildDeviceNode->Sibling;
-        KeReleaseSpinLock(&IopDeviceTreeLock, OldIrql);
-
-        IopCancelPrepareDeviceForRemoval(ChildDeviceNode->PhysicalDeviceObject);
-
-        ChildDeviceNode = NextDeviceNode;
-
-        KeAcquireSpinLock(&IopDeviceTreeLock, &OldIrql);
-    }
-    KeReleaseSpinLock(&IopDeviceTreeLock, OldIrql);
 }
 
 static
@@ -2586,6 +2624,7 @@ PiSurpriseRemoveChildDevices(PDEVICE_NODE ParentDeviceNode)
         IopSendSurpriseRemoval(ChildDeviceNode->PhysicalDeviceObject);
         IopQueueTargetDeviceEvent(&GUID_DEVICE_SURPRISE_REMOVAL, &ChildDeviceNode->InstancePath);
         PiNotifyTargetDeviceChange(&GUID_TARGET_DEVICE_REMOVE_COMPLETE, ChildDeviceNode->PhysicalDeviceObject, NULL);
+        IopDisableDeviceInterfaces(ChildDeviceNode);
         if (ChildDeviceNode->CapabilityFlags & 0x00000008)
             PiNotifyHardwareProfileChange(&GUID_HWPROFILE_CHANGE_COMPLETE);
         InterlockedIncrement(&PiRemovePendingCloses);
@@ -2707,6 +2746,7 @@ IopRemoveDevice(PDEVICE_NODE DeviceNode)
         if (NT_SUCCESS(Status))
         {
             PiNotifyTargetDeviceChange(&GUID_TARGET_DEVICE_REMOVE_COMPLETE, DeviceNode->PhysicalDeviceObject, NULL);
+            IopDisableDeviceInterfaces(DeviceNode);
             /* The dock is gone now, whenever its last handle closes. */
             if (DeviceNode->CapabilityFlags & 0x00000008) // CM_DEVCAP_DOCKDEVICE
                 PiNotifyHardwareProfileChange(&GUID_HWPROFILE_CHANGE_COMPLETE);
@@ -3048,6 +3088,66 @@ IopSendEject(IN PDEVICE_OBJECT DeviceObject)
     return IopSynchronousCall(DeviceObject, &Stack, &Dummy);
 }
 
+static
+NTSTATUS
+PipEjectDevice(
+    _In_ PDEVICE_OBJECT DeviceObject)
+{
+    PDEVICE_NODE DeviceNode = IopGetDeviceNode(DeviceObject);
+    PDEVICE_RELATIONS DeviceRelations = NULL;
+    IO_STATUS_BLOCK IoStatusBlock;
+    IO_STACK_LOCATION Stack;
+    DEVICE_CAPABILITIES Capabilities;
+    NTSTATUS Status;
+    ULONG i;
+
+    IopQueueTargetDeviceEvent(&GUID_DEVICE_KERNEL_INITIATED_EJECT,
+                              &DeviceNode->InstancePath);
+
+    Status = IopQueryDeviceCapabilities(DeviceNode, &Capabilities);
+    if (NT_SUCCESS(Status))
+    {
+        RtlZeroMemory(&Stack, sizeof(Stack));
+        Stack.Parameters.QueryDeviceRelations.Type = EjectionRelations;
+        if (NT_SUCCESS(IopInitiatePnpIrp(DeviceObject,
+                                         &IoStatusBlock,
+                                         IRP_MN_QUERY_DEVICE_RELATIONS,
+                                         &Stack)))
+        {
+            DeviceRelations = (PDEVICE_RELATIONS)IoStatusBlock.Information;
+        }
+    }
+
+    if (DeviceRelations)
+    {
+        for (i = 0; i < DeviceRelations->Count; i++)
+        {
+            if (NT_SUCCESS(Status))
+            {
+                Status = PipQueryAndRemoveDevice(DeviceRelations->Objects[i], NULL);
+                if (Status == STATUS_NO_SUCH_DEVICE)
+                    Status = STATUS_SUCCESS;
+            }
+            ObDereferenceObject(DeviceRelations->Objects[i]);
+        }
+        ExFreePool(DeviceRelations);
+    }
+
+    if (NT_SUCCESS(Status))
+        Status = PipQueryAndRemoveDevice(DeviceObject, NULL);
+
+    if (NT_SUCCESS(Status))
+    {
+        PiSetDevNodeProblem(DeviceNode, CM_PROB_HELD_FOR_EJECT);
+        if (Capabilities.EjectSupported)
+            Status = IopSendEject(DeviceObject);
+    }
+
+    IopQueueTargetDeviceEvent(NT_SUCCESS(Status) ? &GUID_DEVICE_EJECT : &GUID_DEVICE_EJECT_VETOED,
+                              &DeviceNode->InstancePath);
+    return Status;
+}
+
 /*
  * @implemented
  */
@@ -3055,85 +3155,10 @@ VOID
 NTAPI
 IoRequestDeviceEject(IN PDEVICE_OBJECT PhysicalDeviceObject)
 {
-    PDEVICE_NODE DeviceNode = IopGetDeviceNode(PhysicalDeviceObject);
-    PDEVICE_RELATIONS DeviceRelations;
-    IO_STATUS_BLOCK IoStatusBlock;
-    IO_STACK_LOCATION Stack;
-    DEVICE_CAPABILITIES Capabilities;
-    NTSTATUS Status;
+    if (IopGetDeviceNode(PhysicalDeviceObject) == NULL)
+        return;
 
-    IopQueueTargetDeviceEvent(&GUID_DEVICE_KERNEL_INITIATED_EJECT,
-                              &DeviceNode->InstancePath);
-
-    if (IopQueryDeviceCapabilities(DeviceNode, &Capabilities) != STATUS_SUCCESS)
-    {
-        goto cleanup;
-    }
-
-    Stack.Parameters.QueryDeviceRelations.Type = EjectionRelations;
-
-    Status = IopInitiatePnpIrp(PhysicalDeviceObject,
-                               &IoStatusBlock,
-                               IRP_MN_QUERY_DEVICE_RELATIONS,
-                               &Stack);
-    if (!NT_SUCCESS(Status))
-    {
-        DPRINT("IopInitiatePnpIrp() failed with status 0x%08lx\n", Status);
-        DeviceRelations = NULL;
-    }
-    else
-    {
-        DeviceRelations = (PDEVICE_RELATIONS)IoStatusBlock.Information;
-    }
-
-    if (DeviceRelations)
-    {
-        Status = IopQueryRemoveDeviceRelations(DeviceRelations, FALSE);
-        if (!NT_SUCCESS(Status))
-            goto cleanup;
-    }
-
-    Status = IopQueryRemoveChildDevices(DeviceNode, FALSE);
-    if (!NT_SUCCESS(Status))
-    {
-        if (DeviceRelations)
-            IopCancelRemoveDeviceRelations(DeviceRelations);
-        goto cleanup;
-    }
-
-    if (IopPrepareDeviceForRemoval(PhysicalDeviceObject, FALSE) != STATUS_SUCCESS)
-    {
-        if (DeviceRelations)
-            IopCancelRemoveDeviceRelations(DeviceRelations);
-        IopCancelRemoveChildDevices(DeviceNode);
-        goto cleanup;
-    }
-
-    if (DeviceRelations)
-        IopSendRemoveDeviceRelations(DeviceRelations);
-    IopSendRemoveChildDevices(DeviceNode);
-
-    DeviceNode->Problem = CM_PROB_HELD_FOR_EJECT;
-    if (Capabilities.EjectSupported)
-    {
-        if (IopSendEject(PhysicalDeviceObject) != STATUS_SUCCESS)
-        {
-            goto cleanup;
-        }
-    }
-    else
-    {
-        // DeviceNode->Flags |= DNF_DISABLED;
-    }
-
-    IopQueueTargetDeviceEvent(&GUID_DEVICE_EJECT,
-                              &DeviceNode->InstancePath);
-
-    return;
-
-cleanup:
-    IopQueueTargetDeviceEvent(&GUID_DEVICE_EJECT_VETOED,
-                              &DeviceNode->InstancePath);
+    PiQueueDeviceAction(PhysicalDeviceObject, PiActionEjectDevice, NULL, NULL);
 }
 
 static
@@ -3399,6 +3424,8 @@ ActionToStr(
             return "PiActionQueryRemoveDevice";
         case PiActionCloseRemovedDevice:
             return "PiActionCloseRemovedDevice";
+        case PiActionEjectDevice:
+            return "PiActionEjectDevice";
         default:
             return "(request unknown)";
     }
@@ -3560,6 +3587,10 @@ PipRunDeviceActionRequest(
             status = PipQueryAndRemoveDevice(Request->DeviceObject, NULL);
             if (deviceNode->State == DeviceNodeRemoved && deviceNode->Parent == IopRootDeviceNode)
                 PnpRootRetireDevice(Request->DeviceObject);
+            break;
+
+        case PiActionEjectDevice:
+            status = PipEjectDevice(Request->DeviceObject);
             break;
 
         default:

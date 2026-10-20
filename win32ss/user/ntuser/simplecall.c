@@ -406,6 +406,9 @@ NtUserCallOneParam(
                 case ROS_SERVERINFO_ATOMICONSMPROP:
                     Result = gpsi->atomIconSmProp;
                     break;
+                case ROS_SERVERINFO_SRVIFLAGS:
+                    Result = gpsi->dwSRVIFlags;
+                    break;
                 default:
                     EngSetLastError(ERROR_INVALID_PARAMETER);
                     Result = 0;
@@ -779,6 +782,41 @@ NtUserCallTwoParam(
             {
                 ProbeForWrite((PVOID)Param2, sizeof(Info), sizeof(ULONG));
                 RtlCopyMemory((PVOID)Param2, &Info, sizeof(Info));
+            }
+            _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+            {
+                SetLastNtError(_SEH2_GetExceptionCode());
+                Ret = FALSE;
+            }
+            _SEH2_END;
+            break;
+        }
+
+        case TWOPARAM_ROUTINE_ROS_QUERYMENU:
+        {
+            PMENU Menu = UserGetMenuObject((HMENU)Param1);
+            ROS_MENUQUERY Query;
+
+            Ret = FALSE;
+            if (!Menu)
+                break;
+            if (UserObjectMarkedDestroy((HANDLE)Param1))
+            {
+                EngSetLastError(ERROR_INVALID_MENU_HANDLE);
+                break;
+            }
+
+            Query.hbrBack = (ULONG_PTR)Menu->hbrBack;
+            Query.dwMenuData = Menu->dwMenuData;
+            Query.cItems = Menu->cItems;
+            Query.fFlags = Menu->fFlags;
+            Query.dwContextHelpId = Menu->dwContextHelpId;
+            Query.cyMax = Menu->cyMax;
+            Ret = TRUE;
+            _SEH2_TRY
+            {
+                ProbeForWrite((PVOID)Param2, sizeof(Query), sizeof(ULONG));
+                RtlCopyMemory((PVOID)Param2, &Query, sizeof(Query));
             }
             _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
             {

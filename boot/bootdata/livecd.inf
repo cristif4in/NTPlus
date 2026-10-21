@@ -44,10 +44,6 @@ HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList","Public",0x00020
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList\S-1-5-19","ProfileImagePath",0x00020000,"R:\ServiceProfiles\LocalService"
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList\S-1-5-20","ProfileImagePath",0x00020000,"R:\ServiceProfiles\NetworkService"
 
-; Hide the "Internet Browser" desktop icon
-HKLM,"SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\HideDesktopIcons\ClassicStartMenu","{871C5380-42A0-1069-A2EA-08002B30309D}",0x00010001,1
-HKLM,"SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\HideDesktopIcons\NewStartPanel","{871C5380-42A0-1069-A2EA-08002B30309D}",0x00010001,1
-
 ; Shell Folders
 HKLM,"SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\Shell Folders","Common Documents",0x00020000,"%SystemDrive%\Users\Public\Documents"
 HKLM,"SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\Shell Folders","Common Desktop",0x00020000,"%SystemDrive%\Users\Public\Desktop"
@@ -58,6 +54,7 @@ HKCU,"SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\User Shell Folders","Pe
 HKCU,"SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\ComDlg32",,0x00000012
 HKCU,"SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\ComDlg32\LastVisitedMRU",,0x00000012
 HKCU,"SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\ComDlg32\OpenSaveMRU",,0x00000012
+HKCU,"Software\ReactOS\StartMenu2","RecentlyAdded",0x00010000,"Applications Manager.lnk","Accessories\Command Prompt.lnk","Administrative Tools\Device Manager.lnk","Accessories\System Tools\LntGet.lnk","Accessories\System Tools\LiberNT Driver Installer.lnk","Accessories\System Tools\Task Manager.lnk","Accessories\System Tools\Task Manager 11.lnk"
 
 ; Policies overrides
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon","DisableLockWorkstation",0x00010001,1

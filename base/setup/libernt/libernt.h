@@ -127,6 +127,7 @@ typedef struct _SETUPDATA
     WCHAR ComputerName[MAX_COMPUTERNAME_LENGTH + 1];
     WCHAR UserName[UNLEN + 1];
     WCHAR Password[PWLEN + 1];
+    WCHAR PasswordHint[PWLEN + 1];
     DWORD TimeZoneIndex;
     BOOL AutoDaylight;
     WCHAR TimeZoneName[128];
@@ -346,6 +347,14 @@ VOID
 SetupFrameGoTo(
     _In_ HWND hPage,
     _In_ INT Page);
+
+VOID
+SetupFrameReload(
+    _In_ HWND hPage);
+
+VOID
+SetSetupLanguage(
+    _In_ PCWSTR LocaleId);
 
 
 

@@ -47,6 +47,17 @@ ExFreePoolWithTag(PVOID MemPtr, ULONG Tag)
 }
 
 static
+PVOID
+ExAllocatePoolZero(ULONG PoolType, SIZE_T NumberOfBytes, ULONG Tag)
+{
+    PVOID Mem = ExAllocatePoolWithTag(PoolType, NumberOfBytes, Tag);
+
+    if (Mem)
+        RtlZeroMemory(Mem, NumberOfBytes);
+    return Mem;
+}
+
+static
 SIZE_T
 GetPoolAllocSize(PVOID MemPtr)
 {
@@ -144,6 +155,7 @@ AcpiGetPossibleResources (
     return AE_OK;
 }
 
+#define END_TAG_LENGTH ((12 + sizeof(ACPI_SIZE) - 1) & ~(sizeof(ACPI_SIZE) - 1))
 #define BuspGetCurrentResources AcpiGetCurrentResources
 #define BuspGetPossibleResources AcpiGetPossibleResources
 #define BuspGpioInterruptCount(DeviceData, Resource) 0
@@ -193,6 +205,8 @@ START_TEST(Bus_PDO_QueryResourceRequirements)
     PIO_RESOURCE_REQUIREMENTS_LIST ReqList;
     PIO_RESOURCE_LIST ReqList2;
 
+    RtlZeroMemory(&DeviceData, sizeof(DeviceData));
+
     /* Invalid AcpiHandle */
     AcpiCallExpected = FALSE;
     Irp.IoStatus.Status = STATUS_WAIT_0 + 17;
@@ -238,7 +252,7 @@ START_TEST(Bus_PDO_QueryResourceRequirements)
     Resource->Data.Irq.Interrupts[0] = 7;
     Resource = ACPI_NEXT_RESOURCE(Resource);
     Resource->Type = ACPI_RESOURCE_TYPE_END_TAG;
-    Resource->Length = 0;
+    Resource->Length = END_TAG_LENGTH;
     Resource++;
     PossibleBuffer.Pointer = ResourcesBuffer;
     PossibleBuffer.Length = (ULONG_PTR)Resource - (ULONG_PTR)ResourcesBuffer;
@@ -279,7 +293,7 @@ START_TEST(Bus_PDO_QueryResourceRequirements)
     Resource->Data.Irq.Interrupts[1] = 7;
     Resource = ACPI_NEXT_RESOURCE(Resource);
     Resource->Type = ACPI_RESOURCE_TYPE_END_TAG;
-    Resource->Length = 0;
+    Resource->Length = END_TAG_LENGTH;
     Resource++;
     PossibleBuffer.Pointer = ResourcesBuffer;
     PossibleBuffer.Length = (ULONG_PTR)Resource - (ULONG_PTR)ResourcesBuffer;
@@ -322,7 +336,7 @@ START_TEST(Bus_PDO_QueryResourceRequirements)
     Resource->Data.Io.Maximum = 0x3F8;
     Resource = ACPI_NEXT_RESOURCE(Resource);
     Resource->Type = ACPI_RESOURCE_TYPE_END_TAG;
-    Resource->Length = 0;
+    Resource->Length = END_TAG_LENGTH;
     Resource++;
     PossibleBuffer.Pointer = ResourcesBuffer;
     PossibleBuffer.Length = (ULONG_PTR)Resource - (ULONG_PTR)ResourcesBuffer;
@@ -371,7 +385,7 @@ START_TEST(Bus_PDO_QueryResourceRequirements)
     Resource->Data.Irq.Interrupts[1] = 7;
     Resource = ACPI_NEXT_RESOURCE(Resource);
     Resource->Type = ACPI_RESOURCE_TYPE_END_TAG;
-    Resource->Length = 0;
+    Resource->Length = END_TAG_LENGTH;
     Resource++;
     PossibleBuffer.Pointer = ResourcesBuffer;
     PossibleBuffer.Length = (ULONG_PTR)Resource - (ULONG_PTR)ResourcesBuffer;
@@ -459,7 +473,7 @@ START_TEST(Bus_PDO_QueryResourceRequirements)
 
     Resource = ACPI_NEXT_RESOURCE(Resource);
     Resource->Type = ACPI_RESOURCE_TYPE_END_TAG;
-    Resource->Length = 0;
+    Resource->Length = END_TAG_LENGTH;
     Resource++;
     PossibleBuffer.Pointer = ResourcesBuffer;
     PossibleBuffer.Length = (ULONG_PTR)Resource - (ULONG_PTR)ResourcesBuffer;
@@ -476,7 +490,6 @@ START_TEST(Bus_PDO_QueryResourceRequirements)
     ok(ReqList->InterfaceType == Internal, "InterfaceType = %u\n", ReqList->InterfaceType);
     ok(ReqList->BusNumber == 0, "BusNumber = %lu\n", ReqList->BusNumber);
     ok(ReqList->SlotNumber == 0, "SlotNumber = %lu\n", ReqList->SlotNumber);
-    todo_if(1)
     ok(ReqList->AlternativeLists == 2, "AlternativeLists = %lu\n", ReqList->AlternativeLists);
     ok(ReqList->List[0].Version == 1, "List[0].Version = %u\n", ReqList->List[0].Version);
     ok(ReqList->List[0].Revision == 1, "List[0].Revision = %u\n", ReqList->List[0].Revision);
@@ -501,7 +514,6 @@ START_TEST(Bus_PDO_QueryResourceRequirements)
         expect_irq(&ReqList2->Descriptors[5], IO_RESOURCE_ALTERNATIVE, CmResourceShareDeviceExclusive, 7, 7);
     }
     ok_int(ReqList->ListSize, GetPoolAllocSize(ReqList));
-    todo_if(1)
     ok_int(ReqList->ListSize, (ULONG_PTR)&ReqList2->Descriptors[6] - (ULONG_PTR)ReqList);
     ExFreePoolWithTag(ReqList, 'RpcA');
 }

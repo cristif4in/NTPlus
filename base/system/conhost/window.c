@@ -653,7 +653,7 @@ static void update_content_backdrop( struct console *console )
     if (!console->win || !console->active) return;
     fill = console->active->color_map[(console->active->attr >> 4) & 0x0f];
     if (console->window->backdrop_set && console->window->backdrop == fill) return;
-    if (DwmSettingsSetContentBackdrop( console->win, fill, 128 ))
+    if (DwmSettingsSetContentBackdrop( console->win, fill, 192 ))
     {
         console->window->backdrop = fill;
         console->window->backdrop_set = TRUE;
@@ -1432,6 +1432,14 @@ static void record_key_input( struct console *console, BOOL down, WPARAM wparam,
     ir.Event.KeyEvent.uChar.UnicodeChar = 0;
     ir.Event.KeyEvent.dwControlKeyState = get_ctrl_state( key_state );
     if (lparam & (1u << 24)) ir.Event.KeyEvent.dwControlKeyState |= ENHANCED_KEY;
+
+    if (wparam == VK_PACKET)
+    {
+        ir.Event.KeyEvent.wVirtualScanCode  = 0;
+        ir.Event.KeyEvent.uChar.UnicodeChar = HIWORD(lparam);
+        write_console_input( console, &ir, 1, TRUE );
+        return;
+    }
 
     if (down)
     {

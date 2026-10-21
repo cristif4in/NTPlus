@@ -619,7 +619,7 @@ NTSTATUS LdrpFindModuleResourceEntry( PVOID BaseAddress, LDR_RESOURCE_INFO *info
     ULONG size;
     void *root;
     IMAGE_RESOURCE_DIRECTORY *resdirptr;
-    USHORT list[9];  /* list of languages to try */
+    USHORT list[10];  /* list of languages to try */
     int i, pos = 0;
     LCID user_lcid, system_lcid;
 
@@ -656,6 +656,7 @@ NTSTATUS LdrpFindModuleResourceEntry( PVOID BaseAddress, LDR_RESOURCE_INFO *info
         {
             /* 4. current thread locale language */
             pos = push_language( list, pos, LANGIDFROMLCID(NtCurrentTeb()->CurrentLocale) );
+            pos = push_language( list, pos, MAKELANGID( PRIMARYLANGID(LANGIDFROMLCID(NtCurrentTeb()->CurrentLocale)), SUBLANG_NEUTRAL ) );
 
             if (NT_SUCCESS(NtQueryDefaultLocale(TRUE, &user_lcid)))
             {
@@ -712,8 +713,8 @@ static BOOLEAN LdrpIsNeutralFirstResourceType( ULONG_PTR Type )
     return !_wcsicmp( (LPCWSTR)Type, L"MUI" );
 }
 
-NTSTATUS find_entry( PVOID BaseAddress, LDR_RESOURCE_INFO *info,
-                     ULONG level, void **ret, int want_dir )
+static NTSTATUS LdrpFindLocalizedResourceEntry( PVOID BaseAddress, LDR_RESOURCE_INFO *info,
+                                                ULONG level, void **ret, int want_dir )
 {
     NTSTATUS Status, MuiStatus;
     PVOID ResourceBase;
@@ -752,6 +753,36 @@ NTSTATUS find_entry( PVOID BaseAddress, LDR_RESOURCE_INFO *info,
     if (NT_SUCCESS(MuiStatus) || !LdrpIsResourceNotFound( Status ))
         return Status;
     return MuiStatus;
+}
+
+static BOOLEAN LdrpIsNeutralResourceType( ULONG_PTR Type )
+{
+    if (IS_INTRESOURCE(Type))
+    {
+        return Type == (ULONG_PTR)RT_CURSOR || Type == (ULONG_PTR)RT_BITMAP ||
+               Type == (ULONG_PTR)RT_ICON || Type == (ULONG_PTR)RT_GROUP_CURSOR ||
+               Type == (ULONG_PTR)RT_GROUP_ICON || Type == (ULONG_PTR)RT_ANICURSOR ||
+               Type == (ULONG_PTR)RT_ANIICON;
+    }
+    return !_wcsicmp( (LPCWSTR)Type, L"AVI" );
+}
+
+NTSTATUS find_entry( PVOID BaseAddress, LDR_RESOURCE_INFO *info,
+                     ULONG level, void **ret, int want_dir )
+{
+    NTSTATUS Status, NeutralStatus;
+    PVOID ResourceBase;
+
+    Status = LdrpFindLocalizedResourceEntry( BaseAddress, info, level, ret, want_dir );
+    if (!level || !LdrpIsNeutralResourceType( info->Type ) ||
+        (!LdrpIsResourceNotFound( Status ) && Status != STATUS_RESOURCE_DATA_NOT_FOUND) ||
+        !NT_SUCCESS(LdrpGetNeutralResourceModule( BaseAddress, &ResourceBase )))
+    {
+        return Status;
+    }
+
+    NeutralStatus = LdrpFindModuleResourceEntry( ResourceBase, info, level, ret, !!want_dir );
+    return NT_SUCCESS(NeutralStatus) ? NeutralStatus : Status;
 }
 
 PVOID

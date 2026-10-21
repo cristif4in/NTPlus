@@ -1416,7 +1416,7 @@ ProcessKeyEvent(WORD wVk, WORD wScanCode, DWORD dwFlags, BOOL bInjected, DWORD d
 
         /* Post a keyboard message */
         TRACE("Posting keyboard msg %u wParam 0x%x lParam 0x%x\n", Msg.message, Msg.wParam, Msg.lParam);
-        if (!Wnd) {ERR("Window is NULL\n");}
+        if (!Wnd) TRACE("Posting keyboard msg to the focus thread without a window\n");
         if (!RawInputIsNoLegacy(pti->ppi, RIM_TYPEKEYBOARD))
         {
             INPUT_MESSAGE_SOURCE KbdSource = { IMDT_KEYBOARD, bInjected ? IMO_INJECTED : IMO_HARDWARE };
@@ -1515,6 +1515,21 @@ UserProcessKeyboardInput(
     PKL pKl = NULL;
     PKBDTABLES pKbdTbl;
     PUSER_MESSAGE_QUEUE pFocusQueue;
+
+    if (pKbdInputData->Flags & KEY_TERMSRV_VKPACKET)
+    {
+        KEYBDINPUT KbdInput;
+
+        KbdInput.wVk = 0;
+        KbdInput.wScan = pKbdInputData->MakeCode;
+        KbdInput.dwFlags = KEYEVENTF_UNICODE;
+        if (pKbdInputData->Flags & KEY_BREAK)
+            KbdInput.dwFlags |= KEYEVENTF_KEYUP;
+        KbdInput.time = 0;
+        KbdInput.dwExtraInfo = pKbdInputData->ExtraInformation;
+        UserAccessKeyboardInput(&KbdInput);
+        return;
+    }
 
     /* Calculate scan code with prefix */
     wScanCode = pKbdInputData->MakeCode & 0x7F;

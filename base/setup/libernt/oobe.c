@@ -10,6 +10,7 @@
 #include <tzlib.h>
 #include <objbase.h>
 #include <lm.h>
+#include <ntsam.h>
 #include <userenv.h>
 
 #include "oobe.h"
@@ -21,6 +22,7 @@
 #define OOBE_SKIPPED            1
 #define OOBE_DEFAULT_HIVE       L"LiberNT.FirstBoot.Default"
 #define OOBE_APPLY_TIMEOUT      5000
+#define OOBE_DRIVERS_TIMEOUT    (15 * 60 * 1000)
 #define PM_APPLY_DONE           (WM_APP + 3)
 
 NTSTATUS
@@ -266,6 +268,51 @@ WriteUserRegion(
 }
 
 static VOID
+WriteSystemLanguage(
+    _In_ LCID Lcid)
+{
+    static const struct
+    {
+        LCTYPE Type;
+        PCWSTR Name;
+    } CodePages[] =
+    {
+        { LOCALE_IDEFAULTANSICODEPAGE, L"ACP" },
+        { LOCALE_IDEFAULTCODEPAGE, L"OEMCP" },
+        { LOCALE_IDEFAULTMACCODEPAGE, L"MACCP" },
+    };
+    WCHAR Text[16];
+    BOOL Legacy;
+    HKEY hKey;
+    ULONG Index;
+
+    Legacy = GetLocaleInfoW(Lcid, LOCALE_IDEFAULTANSICODEPAGE | LOCALE_NOUSEROVERRIDE, Text, ARRAYSIZE(Text)) &&
+             wcstoul(Text, NULL, 10) != CP_ACP;
+
+    if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, L"SYSTEM\\CurrentControlSet\\Control\\Nls\\Language",
+                      0, KEY_SET_VALUE, &hKey) == ERROR_SUCCESS)
+    {
+        StringCchPrintfW(Text, ARRAYSIZE(Text), L"%04X", LANGIDFROMLCID(Lcid));
+        SetStringValue(hKey, L"InstallLanguage", Text);
+        if (Legacy)
+            SetStringValue(hKey, L"Default", Text);
+        RegCloseKey(hKey);
+    }
+
+    if (Legacy &&
+        RegOpenKeyExW(HKEY_LOCAL_MACHINE, L"SYSTEM\\CurrentControlSet\\Control\\Nls\\CodePage",
+                      0, KEY_SET_VALUE, &hKey) == ERROR_SUCCESS)
+    {
+        for (Index = 0; Index < ARRAYSIZE(CodePages); Index++)
+        {
+            if (GetLocaleInfoW(Lcid, CodePages[Index].Type | LOCALE_NOUSEROVERRIDE, Text, ARRAYSIZE(Text)))
+                SetStringValue(hKey, CodePages[Index].Name, Text);
+        }
+        RegCloseKey(hKey);
+    }
+}
+
+static VOID
 ApplyRegion(
     _In_ PSETUPDATA pSetupData)
 {
@@ -275,6 +322,7 @@ ApplyRegion(
     HKEY hUser;
     LONG Error;
 
+    WriteSystemLanguage(Lcid);
     WriteUserRegion(HKEY_CURRENT_USER, Lcid, pSetupData->DefaultKBLayout);
 
     if (RegOpenKeyExW(HKEY_USERS, L".DEFAULT", 0, KEY_CREATE_SUB_KEY | KEY_SET_VALUE, &hUser) == ERROR_SUCCESS)
@@ -411,6 +459,50 @@ AddToLocalGroup(
     return (Status == ERROR_MEMBER_IN_ALIAS) ? NERR_Success : Status;
 }
 
+static VOID
+SetAccountPasswordHint(
+    _In_ PSETUPDATA pSetupData)
+{
+    UNICODE_STRING DomainName, UserName;
+    SAM_HANDLE ServerHandle = NULL, DomainHandle = NULL, UserHandle = NULL;
+    USER_EXTENDED_INFORMATION Info;
+    PSID DomainSid = NULL;
+    PULONG RelativeIds = NULL;
+    PSID_NAME_USE Use = NULL;
+
+    if (!pSetupData->PasswordHint[0])
+        return;
+
+    RtlInitUnicodeString(&DomainName, pSetupData->ComputerName);
+    RtlInitUnicodeString(&UserName, pSetupData->UserName);
+
+    if (NT_SUCCESS(SamConnect(NULL, &ServerHandle, SAM_SERVER_CONNECT | SAM_SERVER_LOOKUP_DOMAIN, NULL)) &&
+        NT_SUCCESS(SamLookupDomainInSamServer(ServerHandle, &DomainName, &DomainSid)) &&
+        NT_SUCCESS(SamOpenDomain(ServerHandle, DOMAIN_LOOKUP, DomainSid, &DomainHandle)) &&
+        NT_SUCCESS(SamLookupNamesInDomain(DomainHandle, 1, &UserName, &RelativeIds, &Use)) &&
+        Use[0] == SidTypeUser &&
+        NT_SUCCESS(SamOpenUser(DomainHandle, USER_WRITE_PREFERENCES, RelativeIds[0], &UserHandle)))
+    {
+        ZeroMemory(&Info, sizeof(Info));
+        Info.ExtendedWhichFields = USER_EXTENDED_FIELD_PASSWORD_HINT;
+        RtlInitUnicodeString(&Info.PasswordHint, pSetupData->PasswordHint);
+        SamSetInformationUser(UserHandle, UserExtendedInformation, &Info);
+    }
+
+    if (UserHandle != NULL)
+        SamCloseHandle(UserHandle);
+    if (DomainHandle != NULL)
+        SamCloseHandle(DomainHandle);
+    if (ServerHandle != NULL)
+        SamCloseHandle(ServerHandle);
+    if (DomainSid != NULL)
+        SamFreeMemory(DomainSid);
+    if (RelativeIds != NULL)
+        SamFreeMemory(RelativeIds);
+    if (Use != NULL)
+        SamFreeMemory(Use);
+}
+
 static DWORD
 CreateAccount(
     _In_ PSETUPDATA pSetupData)
@@ -435,6 +527,8 @@ CreateAccount(
     Status = NetUserAdd(NULL, 1, (LPBYTE)&Info, NULL);
     if (Status != NERR_Success)
         return Status;
+
+    SetAccountPasswordHint(pSetupData);
 
     if (!LookupAccountNameW(NULL, pSetupData->UserName, UserSid, &cbUserSid, Domain, &cchDomain, &Use))
         return GetLastError();
@@ -486,6 +580,40 @@ DisableSetupAccount(VOID)
     return NetUserSetInfo(NULL, Name, 1008, (LPBYTE)&Flags, NULL);
 }
 
+static VOID
+InstallMissingDrivers(
+    _In_ POOBE_PROGRESS Progress)
+{
+    WCHAR Path[MAX_PATH];
+    WCHAR CommandLine[MAX_PATH + 16];
+    STARTUPINFOW StartupInfo;
+    PROCESS_INFORMATION ProcessInfo;
+    DWORD ExitCode = WAIT_TIMEOUT;
+
+    if (!GetSystemDirectoryW(Path, ARRAYSIZE(Path)) ||
+        FAILED(StringCchCatW(Path, ARRAYSIZE(Path), L"\\lntdrv.exe")) ||
+        GetFileAttributesW(Path) == INVALID_FILE_ATTRIBUTES ||
+        FAILED(StringCchPrintfW(CommandLine, ARRAYSIZE(CommandLine), L"\"%s\" /installall", Path)))
+    {
+        return;
+    }
+
+    SetResText(Progress->hwndActivity, IDS_OOBE_INSTALL_DRIVERS);
+    SetWindowTextW(Progress->hwndItem, L"");
+    ZeroMemory(&StartupInfo, sizeof(StartupInfo));
+    StartupInfo.cb = sizeof(StartupInfo);
+    if (!CreateProcessW(Path, CommandLine, NULL, NULL, FALSE, CREATE_NO_WINDOW, NULL, NULL, &StartupInfo, &ProcessInfo))
+    {
+        DPRINT1("Could not start %S, error %lu\n", Path, GetLastError());
+        return;
+    }
+    if (WaitForSingleObject(ProcessInfo.hProcess, OOBE_DRIVERS_TIMEOUT) == WAIT_OBJECT_0)
+        GetExitCodeProcess(ProcessInfo.hProcess, &ExitCode);
+    DPRINT1("Driver installation finished with %lu\n", ExitCode);
+    CloseHandle(ProcessInfo.hThread);
+    CloseHandle(ProcessInfo.hProcess);
+}
+
 typedef struct _FINISH_CONTEXT
 {
     HWND hwndDlg;
@@ -503,6 +631,7 @@ FinishThread(
     DWORD Error;
     ULONG Index;
 
+    SetSetupLanguage(pSetupData->DefaultLanguage);
     if (ComponentsOnly)
     {
         pSetupData->bInstalled = TRUE;
@@ -546,6 +675,7 @@ Components:
     }
     if (SUCCEEDED(hrCom))
         CoUninitialize();
+    InstallMissingDrivers(&Context->Progress);
 
     PostMessageW(Context->hwndDlg, PM_INSTALL_DONE, ERROR_SUCCESS, 0);
     return ERROR_SUCCESS;
@@ -857,6 +987,7 @@ wWinMain(
     hrCom = CoInitializeEx(NULL, COINIT_APARTMENTTHREADED);
 
     StringCchPrintfW(SetupData.DefaultLanguage, ARRAYSIZE(SetupData.DefaultLanguage), L"%08lX", GetUserDefaultLCID());
+    SetSetupLanguage(SetupData.DefaultLanguage);
     if (!GetKeyboardLayoutNameW(SetupData.DefaultKBLayout))
         StringCchCopyW(SetupData.DefaultKBLayout, ARRAYSIZE(SetupData.DefaultKBLayout), L"00000409");
     GenerateComputerName(SetupData.ComputerName);

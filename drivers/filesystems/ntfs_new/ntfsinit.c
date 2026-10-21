@@ -172,6 +172,28 @@ NtfsFsdDeviceControl(_In_ PDEVICE_OBJECT VolumeDeviceObject,
     }
 
     DeviceExt = (PVolumeContextBlock)(VolumeDeviceObject->DeviceExtension);
+
+    if (VolumeDeviceObject != NtfsDiskFileSystemDeviceObject &&
+        IoGetCurrentIrpStackLocation(Irp)->Parameters.DeviceIoControl.IoControlCode ==
+            IOCTL_VOLSNAP_FLUSH_AND_HOLD_WRITES)
+    {
+        NTSTATUS Status;
+
+        KeEnterCriticalRegion();
+        NtfsAcquireMetadata(DeviceExt);
+        NtfsDiskFlushVolumeKm(DeviceExt->StorageDevice);
+        if (IoForwardIrpSynchronously(DeviceExt->StorageDevice, Irp))
+            Status = Irp->IoStatus.Status;
+        else
+            Status = STATUS_UNSUCCESSFUL;
+        NtfsReleaseMetadata(DeviceExt);
+        KeLeaveCriticalRegion();
+
+        Irp->IoStatus.Status = Status;
+        IoCompleteRequest(Irp, IO_NO_INCREMENT);
+        return Status;
+    }
+
     IoSkipCurrentIrpStackLocation(Irp);
 
     /* Lower driver will complete - we don't have to */
@@ -220,6 +242,7 @@ NtfsPrepareFileDeletion(_In_ PVolumeContextBlock VolCB,
                          _Out_ PSIZE_T DeleteStreamCount)
 {
     PLIST_ENTRY Entry;
+    PLIST_ENTRY Bucket = NtfsStreamHashBucket(VolCB, FileStream->FileReference);
     PStreamContextBlock* Streams;
     SIZE_T Count = 0;
     SIZE_T Index = 0;
@@ -228,9 +251,9 @@ NtfsPrepareFileDeletion(_In_ PVolumeContextBlock VolCB,
     *DeleteStreams = NULL;
     *DeleteStreamCount = 0;
     ExAcquireFastMutex(&VolCB->StreamListMutex);
-    for (Entry = VolCB->StreamList.Flink; Entry != &VolCB->StreamList; Entry = Entry->Flink)
+    for (Entry = Bucket->Flink; Entry != Bucket; Entry = Entry->Flink)
     {
-        PStreamContextBlock Stream = CONTAINING_RECORD(Entry, StreamContextBlock, ListEntry);
+        PStreamContextBlock Stream = CONTAINING_RECORD(Entry, StreamContextBlock, HashEntry);
 
         if (Stream == FileStream ||
             (WholeFile && Stream->FileReference == FileStream->FileReference))
@@ -241,9 +264,9 @@ NtfsPrepareFileDeletion(_In_ PVolumeContextBlock VolCB,
     }
     if (OpenHandles)
     {
-        for (Entry = VolCB->StreamList.Flink; Entry != &VolCB->StreamList; Entry = Entry->Flink)
+        for (Entry = Bucket->Flink; Entry != Bucket; Entry = Entry->Flink)
         {
-            PStreamContextBlock Stream = CONTAINING_RECORD(Entry, StreamContextBlock, ListEntry);
+            PStreamContextBlock Stream = CONTAINING_RECORD(Entry, StreamContextBlock, HashEntry);
 
             if (Stream == FileStream ||
                 (WholeFile && Stream->FileReference == FileStream->FileReference))
@@ -263,9 +286,9 @@ NtfsPrepareFileDeletion(_In_ PVolumeContextBlock VolCB,
         ExReleaseFastMutex(&VolCB->StreamListMutex);
         return STATUS_INSUFFICIENT_RESOURCES;
     }
-    for (Entry = VolCB->StreamList.Flink; Entry != &VolCB->StreamList; Entry = Entry->Flink)
+    for (Entry = Bucket->Flink; Entry != Bucket; Entry = Entry->Flink)
     {
-        PStreamContextBlock Stream = CONTAINING_RECORD(Entry, StreamContextBlock, ListEntry);
+        PStreamContextBlock Stream = CONTAINING_RECORD(Entry, StreamContextBlock, HashEntry);
 
         if (Stream == FileStream ||
             (WholeFile && Stream->FileReference == FileStream->FileReference))

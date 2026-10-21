@@ -204,7 +204,7 @@ IntCompositionCornerRadius(_In_ PWND Wnd)
     BYTE Alpha;
     COLORREF Key;
     DWORD Flags = 0;
-    BOOL ClassicFrame, FlatMenu = FALSE;
+    BOOL ClassicFrame;
 
     if (Radius != 0 && Radius <= 64)
         return (ULONG)Radius;
@@ -228,10 +228,7 @@ IntCompositionCornerRadius(_In_ PWND Wnd)
             return ClassicFrame ? 0 : DWM_CORNER_RADIUS_SMALL_96 * Dpi / 96;
         default:
             if (Wnd->fnid == FNID_MENU)
-            {
-                UserSystemParametersInfo(SPI_GETFLATMENU, 0, &FlatMenu, 0);
-                return FlatMenu ? DWM_CORNER_RADIUS_SMALL_96 * Dpi / 96 : 0;
-            }
+                return 0;
             return (Wnd->style & WS_CAPTION) == WS_CAPTION && !ClassicFrame ?
                    DWM_CORNER_RADIUS_96 * Dpi / 96 : 0;
     }
@@ -2975,10 +2972,19 @@ IntCompositionDwmGetFrame(_In_ PVOID pUser)
         BOOL DxPending;
         BOOL EntryDamaged;
         BOOL Held;
+        BOOL HiddenMinimized = FALSE;
         RECTL Shown;
 
         if (e == NULL || e->Redirect.cx <= 0 || e->Redirect.cy <= 0)
             continue;
+        if (w->style & WS_MINIMIZE)
+        {
+            PWND Desktop = UserGetDesktopWindow();
+            RECTL Visible;
+
+            HiddenMinimized = Desktop != NULL &&
+                              !RECTL_bIntersectRect(&Visible, (PRECTL)&w->rcWindow, (PRECTL)&Desktop->rcWindow);
+        }
         DxPublished = e->Redirect.DxGlobalShare != 0 &&
                       e->Redirect.DxPublishedUpdateId != 0;
         DxPending = DxPublished &&
@@ -3013,7 +3019,7 @@ IntCompositionDwmGetFrame(_In_ PVOID pUser)
                                  bTreePending;
 
             if ((!e->Redirect.FrontValid || bBackingDirty) &&
-                !bBusy &&
+                !bBusy && !HiddenMinimized &&
                 !bPaintPending && !e->Redirect.FrontHeld &&
                 e->Redirect.psurf != NULL && e->Redirect.psurfFront != NULL)
             {
@@ -3074,7 +3080,7 @@ IntCompositionDwmGetFrame(_In_ PVOID pUser)
                     DeferredDamage = TRUE;
                 }
             }
-            else if (e->Damaged && (!e->Redirect.FrontValid || bBackingDirty))
+            else if (e->Damaged && !HiddenMinimized && (!e->Redirect.FrontValid || bBackingDirty))
             {
                 if (bBusy || bPaintPending ||
                     e->Redirect.FrontHeld)
@@ -3094,7 +3100,7 @@ IntCompositionDwmGetFrame(_In_ PVOID pUser)
             (e->Redirect.FrontSection == NULL &&
              e->Redirect.FrontGlobalShare == 0))
         {
-            if (e->Damaged && !PaintDeferred)
+            if (e->Damaged && !PaintDeferred && !HiddenMinimized)
                 DeferredDamage = TRUE;
             continue;
         }

@@ -90,6 +90,9 @@ IInternetProtocol *get_mime_filter(LPCWSTR);
 BOOL is_registered_protocol(LPCWSTR);
 #ifdef __REACTOS__
 BOOL is_direct_builtin_protocol(IUri*);
+#ifdef __REACTOS__
+extern const GUID SID_LiberNTStartNotImplemented;
+#endif
 #endif
 HRESULT register_namespace(IClassFactory*,REFIID,LPCWSTR,BOOL);
 HINTERNET get_internet_session(IInternetBindInfo*);
@@ -174,6 +177,9 @@ struct ProtocolVtbl {
 #define FLAG_RESULT_REPORTED          0x0020
 #define FLAG_ERROR                    0x0040
 #define FLAG_SYNC_READ                0x0080
+#ifdef __REACTOS__
+#define FLAG_NO_CONNECT_STATUS        0x0100
+#endif
 
 HRESULT protocol_start(Protocol*,IInternetProtocol*,IUri*,IInternetProtocolSink*,IInternetBindInfo*);
 HRESULT protocol_continue(Protocol*,PROTOCOLDATA*);
@@ -222,6 +228,7 @@ typedef struct {
     BOOL url_binding;
     BOOL terminated;
     LONG lock_count;
+    CLSID clsid;
 #endif
 
     DWORD bscf;

@@ -3,6 +3,7 @@
 #include <windowsx.h>
 #include <powrprof.h>
 
+#define SM2_KEY             L"Software\\ReactOS\\StartMenu2"
 #define SM2_RECENT_LINK_KEY L"Software\\ReactOS\\StartMenu2\\RecentApps\\Links"
 #define SM2_RECENT_EXE_KEY  L"Software\\ReactOS\\StartMenu2\\RecentApps\\Executables"
 
@@ -32,16 +33,6 @@ enum SM2RCMD
     SM2C_PRINTERS,
     SM2C_ASSIST,
     SM2C_GAP
-};
-
-enum SM2SHUTCMD
-{
-    SM2F_SHUTDOWN = 1,
-    SM2F_RESTART,
-    SM2F_LOGOFF,
-    SM2F_LOCK,
-    SM2F_SLEEP,
-    SM2F_HIBERNATE
 };
 
 enum
@@ -122,15 +113,7 @@ static HBRUSH g_SM2EditBrush = NULL;
 static BOOL
 SM2IsDarkTheme(VOID)
 {
-    DWORD dwValue = 1, cbData = sizeof(dwValue), dwType;
-    if (SHGetValueW(HKEY_CURRENT_USER,
-                    L"Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize",
-                    L"AppsUseLightTheme", &dwType, &dwValue, &cbData) == ERROR_SUCCESS)
-    {
-        return dwValue == 0;
-    }
-    COLORREF c = GetSysColor(COLOR_WINDOW);
-    return (GetRValue(c) * 299 + GetGValue(c) * 587 + GetBValue(c) * 114) / 1000 < 128;
+    return DwmSettingsReadColorScheme() == DWM_COLOR_SCHEME_DARK;
 }
 
 static VOID
@@ -165,8 +148,17 @@ SM2ClassicPalette(SM2PALETTE *pPal)
 static VOID
 SM2SelectPalette(VOID)
 {
+    COLORREF crTaskbar;
+
     if (IsAppThemed())
+    {
         g_SM2Pal = SM2IsDarkTheme() ? g_SM2PalDark : g_SM2PalLight;
+        if (ShellGetTaskbarMaterial(&crTaskbar))
+        {
+            g_SM2Pal = ShellColorIsLight(crTaskbar) ? g_SM2PalLight : g_SM2PalDark;
+            g_SM2Pal.LeftBg = crTaskbar;
+        }
+    }
     else
         SM2ClassicPalette(&g_SM2Pal);
     if (g_SM2EditBrush)
@@ -231,6 +223,7 @@ struct SM2ITEM
     CStringW szName;
     CStringW szPath;
     CStringW szTargetPath;
+    ULONGLONG Created;
     BOOL bFolder;
     BOOL bExpanded;
     HICON hSmallIcon;
@@ -239,7 +232,7 @@ struct SM2ITEM
     BOOL bTargetTried;
     CAtlArray<SM2ITEM*> Children;
 
-    SM2ITEM() : bFolder(FALSE), bExpanded(FALSE), hSmallIcon(NULL), hLargeIcon(NULL),
+    SM2ITEM() : Created(0), bFolder(FALSE), bExpanded(FALSE), hSmallIcon(NULL), hLargeIcon(NULL),
                 bSmallTried(FALSE), bTargetTried(FALSE) {}
 
     ~SM2ITEM()
@@ -351,6 +344,8 @@ SM2EnumFolder(LPCWSTR pszDir, SM2ITEM *pParent, BOOL bFilesOnly)
             pItem->bFolder = FALSE;
             pItem->szName = szName;
             pItem->szPath = szFull;
+            pItem->Created = ((ULONGLONG)wfd.ftCreationTime.dwHighDateTime << 32) |
+                             wfd.ftCreationTime.dwLowDateTime;
             pParent->Children.Add(pItem);
         }
     } while (FindNextFileW(hFind, &wfd));
@@ -572,6 +567,15 @@ SM2IsModernStandby()
     SYSTEM_POWER_CAPABILITIES Capabilities;
 
     return GetPwrCapabilities(&Capabilities) && Capabilities.AoAc;
+}
+
+BOOL StartMenu2_IsPowerCommandAllowed(IN INT nCmd)
+{
+    if (nCmd == SM2F_SLEEP)
+        return IsPwrSuspendAllowed() || SM2IsModernStandby();
+    if (nCmd == SM2F_HIBERNATE)
+        return IsPwrHibernateAllowed();
+    return TRUE;
 }
 
 static DWORD
@@ -890,11 +894,8 @@ public:
         m_cItems = 0;
         for (UINT i = 0; i < _countof(c_Items); i++)
         {
-            if ((c_Items[i].nCmd == SM2F_SLEEP && !IsPwrSuspendAllowed() && !SM2IsModernStandby()) ||
-                (c_Items[i].nCmd == SM2F_HIBERNATE && !IsPwrHibernateAllowed()))
-            {
+            if (!StartMenu2_IsPowerCommandAllowed(c_Items[i].nCmd))
                 continue;
-            }
             m_Visible[m_cItems++] = i;
         }
 
@@ -1222,6 +1223,9 @@ public:
         if (m_iDpi <= 0)
             m_iDpi = 96;
 
+        if (!SM2GetLastUsed(SM2_KEY, L"RecentlyAddedSince"))
+            SM2SetLastUsed(SM2_KEY, L"RecentlyAddedSince");
+
         return Create(hwndTray, CWindow::rcDefault, NULL) != NULL;
     }
 
@@ -1313,6 +1317,82 @@ public:
         {
             if (!m_Recent[i]->hLargeIcon)
                 m_Recent[i]->hLargeIcon = SM2LoadShellIcon(m_Recent[i]->szPath, TRUE);
+        }
+    }
+
+    VOID AddRecentlyAddedList()
+    {
+        WCHAR szList[2048] = L"";
+        DWORD cbList = sizeof(szList) - 2 * sizeof(WCHAR), dwType = 0;
+        FILETIME ft;
+        ULARGE_INTEGER Now;
+
+        if (!m_Flat.GetCount() ||
+            SHGetValueW(HKEY_CURRENT_USER, SM2_KEY, L"RecentlyAdded",
+                        &dwType, szList, &cbList) != ERROR_SUCCESS)
+        {
+            return;
+        }
+
+        GetSystemTimeAsFileTime(&ft);
+        Now.LowPart = ft.dwLowDateTime;
+        Now.HighPart = ft.dwHighDateTime;
+
+        if (dwType == REG_MULTI_SZ)
+        {
+            for (LPCWSTR pszEntry = szList; *pszEntry; pszEntry += wcslen(pszEntry) + 1)
+            {
+                int cchEntry = (int)wcslen(pszEntry);
+                for (SIZE_T i = 0; i < m_Flat.GetCount(); i++)
+                {
+                    const CStringW &Path = m_Flat[i]->szPath;
+                    int cchPath = Path.GetLength();
+                    if (cchPath <= cchEntry || Path[cchPath - cchEntry - 1] != L'\\' ||
+                        lstrcmpiW((LPCWSTR)Path + cchPath - cchEntry, pszEntry) != 0)
+                    {
+                        continue;
+                    }
+                    if (!SM2GetLastUsed(SM2_RECENT_LINK_KEY, Path))
+                    {
+                        SHSetValueW(HKEY_CURRENT_USER, SM2_RECENT_LINK_KEY, Path,
+                                    REG_QWORD, &Now.QuadPart, sizeof(Now.QuadPart));
+                    }
+                }
+            }
+        }
+
+        SHDeleteValueW(HKEY_CURRENT_USER, SM2_KEY, L"RecentlyAdded");
+    }
+
+    VOID AddRecentlyAdded()
+    {
+        ULONGLONG Since = SM2GetLastUsed(SM2_KEY, L"RecentlyAddedSince");
+        ULONGLONG Newest = Since;
+
+        if (!Since)
+        {
+            SM2SetLastUsed(SM2_KEY, L"RecentlyAddedSince");
+            return;
+        }
+
+        for (SIZE_T i = 0; i < m_Flat.GetCount(); i++)
+        {
+            ULONGLONG Created = m_Flat[i]->Created;
+            if (Created <= Since)
+                continue;
+            if (SM2GetLastUsed(SM2_RECENT_LINK_KEY, m_Flat[i]->szPath) < Created)
+            {
+                SHSetValueW(HKEY_CURRENT_USER, SM2_RECENT_LINK_KEY, m_Flat[i]->szPath,
+                            REG_QWORD, &Created, sizeof(Created));
+            }
+            if (Created > Newest)
+                Newest = Created;
+        }
+
+        if (Newest != Since)
+        {
+            SHSetValueW(HKEY_CURRENT_USER, SM2_KEY, L"RecentlyAddedSince",
+                        REG_QWORD, &Newest, sizeof(Newest));
         }
     }
 
@@ -1411,6 +1491,8 @@ public:
         m_Rows.SetCount(0);
         SM2BuildTree(&m_Root);
         SM2FlattenTree(&m_Root, m_Flat);
+        AddRecentlyAddedList();
+        AddRecentlyAdded();
         AddRecentExecutables();
         BuildRecent();
         BuildTreeVis();
@@ -1418,11 +1500,17 @@ public:
 
     VOID BuildResults(LPCWSTR pszQuery)
     {
+        int cchQuery = lstrlenW(pszQuery);
+
         m_Results.SetCount(0);
         for (SIZE_T i = 0; i < m_Flat.GetCount() && m_Results.GetCount() < 100; i++)
         {
-            if (StrStrIW(m_Flat[i]->szName, pszQuery))
+            if (StrStrIW(m_Flat[i]->szName, pszQuery) ||
+                (SM2GetTargetPath(m_Flat[i]) &&
+                 StrCmpNIW(PathFindFileNameW(m_Flat[i]->szTargetPath), pszQuery, cchQuery) == 0))
+            {
                 m_Results.Add(m_Flat[i]);
+            }
         }
     }
 
@@ -2006,6 +2094,7 @@ public:
 
         m_uPosition = uPos;
         SM2SelectPalette();
+        RefreshLiquidMaterial();
         RebuildData();
 
         int w = MenuW(), h = MenuH();
@@ -3104,6 +3193,11 @@ public:
 };
 
 static CStartMenu2Wnd *g_pStartMenu2 = NULL;
+
+VOID StartMenu2_DoPowerCommand(IN HWND hwndOwner, IN INT nCmd)
+{
+    SM2DoShutdownCmd(hwndOwner, nCmd);
+}
 
 HRESULT StartMenu2_Create(IN ITrayWindow *Tray, IN HWND hwndTray)
 {

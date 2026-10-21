@@ -81,8 +81,8 @@ enum class PageId
     Controller,
     Accessibility,
     Privacy,
-    Updates,
     Search,
+    Legacy,
     Count
 };
 
@@ -278,6 +278,5 @@ void BuildGaming(PageBuilder &page);
 void BuildController(PageBuilder &page);
 void BuildAccessibility(PageBuilder &page);
 void BuildPrivacy(PageBuilder &page);
-void BuildUpdates(PageBuilder &page);
 
 extern HINSTANCE Instance;

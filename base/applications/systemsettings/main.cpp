@@ -16,6 +16,7 @@ extern "C"
 }
 #include <wlanapi.h>
 #include <secext.h>
+#include <reactos/dwmsettings.h>
 #include <algorithm>
 
 using namespace ShellFrame;
@@ -54,7 +55,7 @@ GlassColor(const Theme &theme, GlassTone tone)
     };
     const Palette &c = theme.Colors();
 
-    if (!theme.IsHighContrast())
+    if (!theme.IsHighContrast() && IsAppThemed())
         return Tones[(int)tone];
     switch (tone)
     {
@@ -306,6 +307,7 @@ protected:
     {
         LOGFONTW lf;
 
+        UpdateGlassFonts();
         if (m_SearchFont)
             DeleteObject(m_SearchFont);
         m_SearchFont = NULL;
@@ -316,10 +318,80 @@ protected:
             SendMessageW(m_Search, WM_SETFONT, (WPARAM)m_SearchFont, TRUE);
         }
         ApplyControlTheme(m_ScrollBar);
+        m_NavButtons.SetColors(Glass(GlassTone::Text), Glass(GlassTone::TextDisabled));
         if (m_Crumbs)
             SendMessageW(m_Crumbs, WM_SETFONT, (WPARAM)m_Theme.Font(TextStyle::Title), TRUE);
         if (m_NavTree)
+        {
+            std::vector<PageId> pages = Categories();
+            std::vector<LPCWSTR> icons;
+            HIMAGELIST old;
+
+            for (PageId page : pages)
+                icons.push_back(FindPage(page)->Icon);
+            old = m_NavImages;
+            m_NavImages = GlyphList(icons.data(), icons.size(), m_Theme.Scale(18), Glass(GlassTone::Text));
+            SendMessageW(m_NavTree, TVM_SETIMAGELIST, TVSIL_NORMAL, (LPARAM)m_NavImages);
+            if (old)
+                ImageList_Destroy(old);
+            SendMessageW(m_NavTree, TVM_SETBKCOLOR, 0, Glass(GlassTone::Clear));
+            SendMessageW(m_NavTree, TVM_SETTEXTCOLOR, 0, Glass(GlassTone::Text));
             SendMessageW(m_NavTree, WM_SETFONT, (WPARAM)m_Theme.Font(TextStyle::Body), TRUE);
+        }
+    }
+
+    void UpdateGlassFonts()
+    {
+        for (int i = 0; i < (int)TextStyle::Count; i++)
+        {
+            LOGFONTW lf;
+
+            if (m_GlassFonts[i])
+                DeleteObject(m_GlassFonts[i]);
+            m_GlassFonts[i] = NULL;
+            if (GetObjectW(m_Theme.Font((TextStyle)i), sizeof(lf), &lf))
+            {
+                lf.lfQuality = ANTIALIASED_QUALITY;
+                m_GlassFonts[i] = CreateFontIndirectW(&lf);
+            }
+        }
+    }
+
+    COLORREF Glass(GlassTone tone) const
+    {
+        ULONG_PTR key = (ULONG_PTR)GetPropW(m_hwnd, DWM_PROP_BACKDROP_COLOR);
+        COLORREF clear;
+
+        if (!key || m_Theme.IsHighContrast() || !IsAppThemed())
+            return GlassColor(m_Theme, tone);
+        clear = (COLORREF)(key - 1);
+        if (tone == GlassTone::Clear)
+            return clear;
+        if (GetRValue(clear) * 299 + GetGValue(clear) * 587 + GetBValue(clear) * 114 < 128000)
+            return GlassColor(m_Theme, tone);
+        switch (tone)
+        {
+            case GlassTone::TextSecondary:
+                return RGB(0x5D, 0x5D, 0x5D);
+            case GlassTone::TextDisabled:
+                return RGB(0xA0, 0xA0, 0xA0);
+            default:
+                return RGB(0x1B, 0x1B, 0x1B);
+        }
+    }
+
+    COLORREF GlassTint(BYTE opacity) const
+    {
+        COLORREF back = Glass(GlassTone::Clear), ink = Glass(GlassTone::Text);
+
+        return RGB((GetRValue(ink) * opacity + GetRValue(back) * (255 - opacity)) / 255,
+                   (GetGValue(ink) * opacity + GetGValue(back) * (255 - opacity)) / 255,
+                   (GetBValue(ink) * opacity + GetBValue(back) * (255 - opacity)) / 255);
+    }
+
+    HFONT GlassFont(TextStyle style) const
+    {
+        return m_GlassFonts[(int)style] ? m_GlassFonts[(int)style] : m_Theme.Font(style);
     }
 
     bool LightControls() const
@@ -378,8 +450,8 @@ protected:
         RECT glass = { 0, 0, GlassWidth(), client.bottom }, caption = { 0, 0, client.right, CaptionHeight() };
 
         canvas.Fill(client, c.Window);
-        canvas.Fill(glass, GlassColor(m_Theme, GlassTone::Clear));
-        canvas.Fill(caption, GlassColor(m_Theme, GlassTone::Clear));
+        canvas.Fill(glass, Glass(GlassTone::Clear));
+        canvas.Fill(caption, Glass(GlassTone::Clear));
         {
             Gdiplus::GraphicsPath panel(Gdiplus::FillModeAlternate);
             Gdiplus::SolidBrush fill(Gdiplus::Color(255, GetRValue(c.Window), GetGValue(c.Window), GetBValue(c.Window)));
@@ -437,6 +509,7 @@ protected:
                 m_Scroll -= MulDiv(GET_WHEEL_DELTA_WPARAM(wParam), m_Theme.Scale(64), WHEEL_DELTA);
                 ClampScroll();
                 Invalidate(NULL);
+                UpdateWindow(m_hwnd);
                 return 0;
             }
             case WM_VSCROLL:
@@ -491,15 +564,26 @@ protected:
             {
                 NMHDR *header = (NMHDR *)lParam;
                 LRESULT result;
-                if (m_NavButtons.OnNotify(header, &result, GlassColor(m_Theme, GlassTone::Clear)))
+                if (m_NavButtons.OnNotify(header, &result, Glass(GlassTone::Clear)))
                     return result;
                 if (header->hwndFrom == m_NavTree && header->code == NM_CUSTOMDRAW)
                     return DrawNavItem((NMTVCUSTOMDRAW *)lParam);
                 if (header->hwndFrom == m_NavTree && header->code == TVN_SELCHANGEDW)
                 {
                     NMTREEVIEWW *tree = (NMTREEVIEWW *)lParam;
-                    if (tree->action == TVC_BYMOUSE || tree->action == TVC_BYKEYBOARD)
+                    if (tree->action == TVC_BYMOUSE ||
+                        (tree->action == TVC_BYKEYBOARD && (PageId)tree->itemNew.lParam != PageId::Legacy))
                         PostMessageW(m_hwnd, WM_SETTINGS_NAVIGATE, (WPARAM)tree->itemNew.lParam, 0);
+                    return 0;
+                }
+                if (header->hwndFrom == m_NavTree && header->code == TVN_KEYDOWN &&
+                    ((NMTVKEYDOWN *)lParam)->wVKey == VK_RETURN)
+                {
+                    TVITEMW data = { TVIF_PARAM };
+
+                    data.hItem = (HTREEITEM)SendMessageW(m_NavTree, TVM_GETNEXTITEM, TVGN_CARET, 0);
+                    if (data.hItem && SendMessageW(m_NavTree, TVM_GETITEMW, 0, (LPARAM)&data))
+                        PostMessageW(m_hwnd, WM_SETTINGS_NAVIGATE, (WPARAM)data.lParam, 0);
                     return 0;
                 }
                 if (header->hwndFrom == m_Crumbs && (header->code == NM_CLICK || header->code == NM_RETURN))
@@ -659,6 +743,12 @@ protected:
                 if (m_NavImages)
                     ImageList_Destroy(m_NavImages);
                 m_NavImages = NULL;
+                for (int i = 0; i < (int)TextStyle::Count; i++)
+                {
+                    if (m_GlassFonts[i])
+                        DeleteObject(m_GlassFonts[i]);
+                    m_GlassFonts[i] = NULL;
+                }
                 if (m_SmallIcon)
                     DestroyIcon(m_SmallIcon);
                 if (m_BigIcon)
@@ -802,6 +892,12 @@ private:
 
     void Navigate(PageId page, const std::wstring &param, BOOL remember)
     {
+        if (page == PageId::Legacy)
+        {
+            Launch(L"control.exe");
+            PostMessageW(m_hwnd, WM_CLOSE, 0, 0);
+            return;
+        }
         if (page == m_Page && param == m_Param)
             return;
         if (remember)
@@ -1055,8 +1151,8 @@ private:
         title.top = 0;
         title.right = PanelLeft();
         title.bottom = CaptionHeight();
-        canvas.Text(Str(IDS_APP_TITLE).c_str(), title, m_Theme.Font(TextStyle::Caption),
-                    IsActive() ? GlassColor(m_Theme, GlassTone::Text) : GlassColor(m_Theme, GlassTone::TextSecondary), DT_SINGLELINE | DT_VCENTER | DT_LEFT);
+        canvas.Text(Str(IDS_APP_TITLE).c_str(), title, GlassFont(TextStyle::Caption),
+                    IsActive() ? Glass(GlassTone::Text) : Glass(GlassTone::TextSecondary), DT_SINGLELINE | DT_VCENTER | DT_LEFT);
     }
 
     void CenterIcon(Canvas &canvas, const RECT &box, int size, LPCWSTR name, COLORREF color)
@@ -1075,21 +1171,21 @@ private:
 
         canvas.Graphics().Flush(Gdiplus::FlushIntentionSync);
         if (m_HotAccount || TopLevel(m_Page) == PageId::Accounts)
-            FillRoundGlass(canvas.Dc(), tile, m_Theme.ScaleF(6.0f), RGB(255, 255, 255),
-                           TopLevel(m_Page) == PageId::Accounts ? 26 : 13);
+            FillRoundSmooth(canvas.Dc(), tile, m_Theme.ScaleF(6.0f),
+                            GlassTint(TopLevel(m_Page) == PageId::Accounts ? 26 : 13));
         SetRect(&avatar, tile.left + m_Theme.Scale(6), tile.top + m_Theme.Scale(6), tile.left + m_Theme.Scale(38),
                 tile.top + m_Theme.Scale(38));
-        FillRoundGlass(canvas.Dc(), avatar, m_Theme.ScaleF(16.0f), RGB(255, 255, 255), 26);
-        CenterIcon(canvas, avatar, m_Theme.Scale(18), L"person_20_regular", GlassColor(m_Theme, GlassTone::Text));
+        FillRoundSmooth(canvas.Dc(), avatar, m_Theme.ScaleF(16.0f), GlassTint(26));
+        CenterIcon(canvas, avatar, m_Theme.Scale(18), L"person_20_regular", Glass(GlassTone::Text));
         SetRect(&name, avatar.right + m_Theme.Scale(10), tile.top + m_Theme.Scale(4), tile.right - m_Theme.Scale(8),
                 tile.top + m_Theme.Scale(22));
-        canvas.Text(m_User, name, m_Theme.Font(TextStyle::BodyStrong), GlassColor(m_Theme, GlassTone::Text),
+        canvas.Text(m_User, name, GlassFont(TextStyle::BodyStrong), Glass(GlassTone::Text),
                     DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS);
         kind = name;
         kind.top = name.bottom;
         kind.bottom = kind.top + m_Theme.Scale(18);
         canvas.Text(Str(m_Admin ? IDS_ACCOUNT_ADMIN_LOCAL : IDS_ACCOUNT_STANDARD_LOCAL).c_str(), kind,
-                    m_Theme.Font(TextStyle::Caption), GlassColor(m_Theme, GlassTone::TextSecondary), DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS);
+                    GlassFont(TextStyle::Caption), Glass(GlassTone::TextSecondary), DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS);
     }
 
     void PaintHeader(Canvas &canvas)
@@ -1311,25 +1407,18 @@ private:
     void CreateChrome()
     {
         std::vector<PageId> pages = Categories();
-        std::vector<LPCWSTR> icons;
         std::wstring back = Str(IDS_BACK), forward = Str(IDS_FORWARD);
 
         m_NavButtons.Create(m_hwnd, m_Theme, IDC_BACK, IDC_FORWARD, back.c_str(), forward.c_str(),
-                            GlassColor(m_Theme, GlassTone::Text), GlassColor(m_Theme, GlassTone::TextDisabled));
+                            Glass(GlassTone::Text), Glass(GlassTone::TextDisabled));
 
         m_NavTree = CreateWindowExW(0, WC_TREEVIEWW, L"", WS_CHILD | WS_VISIBLE | WS_TABSTOP | TVS_FULLROWSELECT |
                                     TVS_SHOWSELALWAYS | TVS_TRACKSELECT | TVS_NOHSCROLL, 0, 0, 0, 0, m_hwnd,
                                     (HMENU)IDC_NAVTREE, Instance, NULL);
         if (m_NavTree)
         {
-            for (PageId page : pages)
-                icons.push_back(FindPage(page)->Icon);
-            m_NavImages = GlyphList(icons.data(), icons.size(), m_Theme.Scale(18), GlassColor(m_Theme, GlassTone::Text));
             SendMessageW(m_NavTree, WM_SETFONT, (WPARAM)m_Theme.Font(TextStyle::Body), FALSE);
-            SendMessageW(m_NavTree, TVM_SETIMAGELIST, TVSIL_NORMAL, (LPARAM)m_NavImages);
             SendMessageW(m_NavTree, TVM_SETITEMHEIGHT, m_Theme.Scale(40), 0);
-            SendMessageW(m_NavTree, TVM_SETBKCOLOR, 0, GlassColor(m_Theme, GlassTone::Clear));
-            SendMessageW(m_NavTree, TVM_SETTEXTCOLOR, 0, GlassColor(m_Theme, GlassTone::Text));
             for (size_t i = 0; i < pages.size(); i++)
             {
                 TVINSERTSTRUCTW insert = { };
@@ -1410,7 +1499,7 @@ private:
         }
         if (box.left < PanelLeft() || box.top < CaptionHeight())
         {
-            glass = CreateSolidBrush(GlassColor(m_Theme, GlassTone::Clear));
+            glass = CreateSolidBrush(Glass(GlassTone::Clear));
             FillRect(hdc, &box, glass);
             DeleteObject(glass);
             return TRUE;
@@ -1538,31 +1627,31 @@ private:
             return CDRF_NOTIFYITEMDRAW;
         if (draw->nmcd.dwDrawStage == CDDS_ITEMPREPAINT)
         {
-            HDC hdc = draw->nmcd.hdc;
-            RECT rc = draw->nmcd.rc, pill, label;
+            RECT rc = { 0, 0, draw->nmcd.rc.right - draw->nmcd.rc.left, draw->nmcd.rc.bottom - draw->nmcd.rc.top };
+            RECT pill, label;
             WCHAR title[128] = L"";
             TVITEMW data = { TVIF_TEXT | TVIF_IMAGE | TVIF_STATE, (HTREEITEM)draw->nmcd.dwItemSpec, 0, TVIS_SELECTED, title,
                              _countof(title) };
-            HBRUSH glass = CreateSolidBrush(GlassColor(m_Theme, GlassTone::Clear));
             int size = m_Theme.Scale(18);
             BOOL selected, hot = (draw->nmcd.uItemState & CDIS_HOT) != 0;
+            Canvas canvas(draw->nmcd.hdc, draw->nmcd.rc);
+            HDC hdc = canvas.Dc();
 
             SendMessageW(m_NavTree, TVM_GETITEMW, 0, (LPARAM)&data);
             selected = (data.state & TVIS_SELECTED) != 0;
-            FillRect(hdc, &rc, glass);
-            DeleteObject(glass);
+            canvas.Fill(rc, Glass(GlassTone::Clear));
             pill = rc;
             pill.top += m_Theme.Scale(2);
             pill.bottom -= m_Theme.Scale(2);
             pill.right -= m_Theme.Scale(4);
             if (selected || hot)
-                FillRoundGlass(hdc, pill, m_Theme.ScaleF(6.0f), RGB(255, 255, 255), selected ? 26 : 13);
+                FillRoundSmooth(hdc, pill, m_Theme.ScaleF(6.0f), GlassTint(selected ? 26 : 13));
             ImageList_Draw(m_NavImages, data.iImage, hdc, pill.left + m_Theme.Scale(14), (rc.top + rc.bottom - size) / 2,
                            ILD_TRANSPARENT);
             label = pill;
             label.left += m_Theme.Scale(46);
             SetBkMode(hdc, TRANSPARENT);
-            DrawLabel(hdc, title, label, m_Theme.Font(TextStyle::Body), GlassColor(m_Theme, GlassTone::Text),
+            DrawLabel(hdc, title, label, GlassFont(TextStyle::Body), Glass(GlassTone::Text),
                      DT_SINGLELINE | DT_VCENTER | DT_LEFT | DT_END_ELLIPSIS);
             if ((draw->nmcd.uItemState & CDIS_FOCUS) && GetFocus() == m_NavTree &&
                 !(SendMessageW(m_hwnd, WM_QUERYUISTATE, 0, 0) & UISF_HIDEFOCUS))
@@ -1766,10 +1855,11 @@ private:
                 defer = DeferWindowPos(defer, control.Window, control.Action == BAR_ACTION ? HWND_TOP : NULL, rc.left,
                                        rc.top, rc.right - rc.left, height,
                                        (control.Action == BAR_ACTION ? 0 : SWP_NOZORDER) | SWP_NOACTIVATE |
-                                       (shown ? SWP_SHOWWINDOW : SWP_HIDEWINDOW));
+                                       SWP_NOCOPYBITS | SWP_NOREDRAW | (shown ? SWP_SHOWWINDOW : SWP_HIDEWINDOW));
         }
         if (defer)
             EndDeferWindowPos(defer);
+        RedrawWindow(m_hwnd, &view, NULL, RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN);
     }
 
     void OnScrollBar(UINT code)
@@ -1809,6 +1899,7 @@ private:
         }
         ClampScroll();
         Invalidate(NULL);
+        UpdateWindow(m_hwnd);
     }
 
     void OnSlider(int index, UINT code)
@@ -1951,6 +2042,7 @@ private:
         }
         ClampScroll();
         Invalidate(NULL);
+        UpdateWindow(m_hwnd);
         return TRUE;
     }
 
@@ -2106,6 +2198,7 @@ private:
     HICON m_BigIcon;
     WCHAR m_User[UNLEN + 1];
     bool m_IndexReady;
+    HFONT m_GlassFonts[(int)TextStyle::Count] = { };
 };
 
 static void

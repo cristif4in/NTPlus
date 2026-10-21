@@ -29,7 +29,6 @@
 #define IDS_PAGE_GAMING                119
 #define IDS_PAGE_ACCESSIBILITY         120
 #define IDS_PAGE_PRIVACY               121
-#define IDS_PAGE_UPDATE                122
 #define IDS_PAGE_DISPLAY               123
 #define IDS_PAGE_SOUND                 124
 #define IDS_PAGE_POWER                 125
@@ -418,6 +417,12 @@
 #define IDS_CURRENT_PASSWORD           508
 #define IDS_NEW_PASSWORD               509
 #define IDS_CONFIRM_PASSWORD           510
+#define IDS_PASSWORD_HINT              900
+#define IDS_PASSWORD_HINT_NEEDED       901
+#define IDS_PASSWORD_MISMATCH          902
+#define IDS_PASSWORD_INCORRECT         903
+#define IDS_CREATE_PASSWORD            904
+#define IDS_PASSWORD_HINT_CONTAINS     905
 #define IDS_SIGNIN_EXTRA               511
 #define IDS_REQUIRE_SIGNIN             512
 #define IDS_REQUIRE_SIGNIN_DESC        513
@@ -507,12 +512,7 @@
 #define IDS_OPTIONAL_DIAGNOSTICS       597
 #define IDS_OPTIONAL_DIAGNOSTICS_DESC  598
 #define IDS_DIAGNOSTICS_NOTE           599
-#define IDS_VERSION_INFO               600
 #define IDS_BUILD_LAB                  601
-#define IDS_KERNEL_VERSION             602
-#define IDS_RUNNING_VERSION            603
-#define IDS_LIBERNT_WEBSITE            604
-#define IDS_LIBERNT_WEBSITE_DESC       605
 #define IDS_SYSTEM_SOUNDS              606
 #define IDS_UNKNOWN_APP                607
 #define IDS_APP_VOLUME                 608
@@ -744,3 +744,8 @@
 #define IDS_SHOW_LAST_USER_DESC        834
 #define IDS_SIGNIN_POWER               835
 #define IDS_SIGNIN_POWER_DESC          836
+#define IDS_RELEASE                    837
+#define IDS_DEVELOPMENT_PREVIEW        838
+#define IDS_TARGET                     839
+#define IDS_TARGET_FORMAT              840
+#define IDS_PAGE_LEGACY                841

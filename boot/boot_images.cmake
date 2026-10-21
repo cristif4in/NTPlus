@@ -394,6 +394,7 @@ endfunction()
 file(WRITE ${CMAKE_CURRENT_BINARY_DIR}/livecd.cmake.lst "${CMAKE_CURRENT_BINARY_DIR}/empty\n")
 # Create TEMP directory
 file(APPEND ${CMAKE_CURRENT_BINARY_DIR}/livecd.cmake.lst "reactos/TEMP=${CMAKE_CURRENT_BINARY_DIR}/empty\n")
+file(APPEND ${CMAKE_CURRENT_BINARY_DIR}/livecd.cmake.lst "reactos/SystemTemp=${CMAKE_CURRENT_BINARY_DIR}/empty\n")
 add_system_dirs(${CMAKE_CURRENT_BINARY_DIR}/livecd.cmake.lst)
 add_program_files_dirs(${CMAKE_CURRENT_BINARY_DIR}/livecd.cmake.lst)
 file(APPEND ${CMAKE_CURRENT_BINARY_DIR}/livecd.cmake.lst "reactos/system32/Tasks=${CMAKE_CURRENT_BINARY_DIR}/empty\n")
@@ -497,6 +498,7 @@ endif()
 
 # Create TEMP dir
 file(APPEND ${CMAKE_CURRENT_BINARY_DIR}/preinstall.cmake.lst "reactos/TEMP=${CMAKE_CURRENT_BINARY_DIR}/empty\n")
+file(APPEND ${CMAKE_CURRENT_BINARY_DIR}/preinstall.cmake.lst "reactos/SystemTemp=${CMAKE_CURRENT_BINARY_DIR}/empty\n")
 add_system_dirs(${CMAKE_CURRENT_BINARY_DIR}/preinstall.cmake.lst)
 file(APPEND ${CMAKE_CURRENT_BINARY_DIR}/preinstall.cmake.lst "reactos/system32/Tasks=${CMAKE_CURRENT_BINARY_DIR}/empty\n")
 
@@ -557,7 +559,7 @@ if(PREINSTALL_EXTRA_FILE_LIST)
 endif()
 
 cmake_dependent_option(PREINSTALL_WINE_GECKO
-                       "Preinstall the Wine Gecko engine that mshtml uses in the preinstalled disk image" ON
+                       "Preinstall the Wine Gecko engine that mshtml uses in the preinstalled disk image" OFF
                        "ENABLE_ROSTESTS" OFF)
 if(PREINSTALL_WINE_GECKO)
     set(_wine_gecko_version 2.47.4)
@@ -904,7 +906,7 @@ add_custom_target(preinstall_partition
         -DPACKAGE_PDBS=${ROSPROFILER_PACKAGE_IMAGE_PDBS}
         -P ${REACTOS_SOURCE_DIR}/boot/pack_rosprofiler_symbols.cmake
     COMMAND native-fatten ${_preinstall_boot_partition_file}
-        -format ${_preinstall_boot_partition_sectors} ${_preinstall_boot_partition_fs} ROSBOOT
+        -format ${_preinstall_boot_partition_sectors} ${_preinstall_boot_partition_fs} LIBERNTBOOT
         ${_preinstall_boot_partition_options}
         ${_preinstall_boot_partition_files}
     COMMAND native-ntfsimg
@@ -913,7 +915,7 @@ add_custom_target(preinstall_partition
         ${_preinstall_system_partition_sectors}
         ${_preinstall_system_partition_start}
         ${_preinstall_ntfs_sectors_per_cluster}
-        ReactOS
+        LiberNT
     COMMAND native-ntfsimg
         --addfiles
         ${_preinstall_system_partition_file}

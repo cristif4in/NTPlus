@@ -513,8 +513,6 @@ MountMgrNextDriveLetterWorker(IN PDEVICE_EXTENSION DeviceExtension,
         }
     }
 
-    /* MiniNT hides removable boot media. Normal no-automount mode instead
-     * permits removable media while keeping fixed volumes unassigned. */
     if (!MountMgrAutoMountAllowed(DeviceExtension, Removable))
     {
         if (DriveLetterInfo->DriveLetterWasAssigned)
@@ -2024,8 +2022,10 @@ MountMgrVolumeMountPointChanged(IN PDEVICE_EXTENSION DeviceExtension,
 
     VolumeMountPoint = (PMOUNTMGR_VOLUME_MOUNT_POINT)Irp->AssociatedIrp.SystemBuffer;
 
-    if (((ULONG)VolumeMountPoint->SourceVolumeNameLength + VolumeMountPoint->TargetVolumeNameLength) <
-        Stack->Parameters.DeviceIoControl.InputBufferLength)
+    if ((ULONG)VolumeMountPoint->SourceVolumeNameOffset + VolumeMountPoint->SourceVolumeNameLength >
+            Stack->Parameters.DeviceIoControl.InputBufferLength ||
+        (ULONG)VolumeMountPoint->TargetVolumeNameOffset + VolumeMountPoint->TargetVolumeNameLength >
+            Stack->Parameters.DeviceIoControl.InputBufferLength)
     {
         return STATUS_INVALID_PARAMETER;
     }

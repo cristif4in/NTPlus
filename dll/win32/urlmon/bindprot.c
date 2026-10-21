@@ -532,6 +532,7 @@ static HRESULT WINAPI BindProtocol_StartEx(IInternetProtocolEx *iface, IUri *pUr
     }
 
 #ifdef __REACTOS__
+    This->clsid = clsid;
     if(!direct) {
 #endif
     StringFromCLSID(&clsid, &clsid_str);
@@ -1017,8 +1018,15 @@ static HRESULT report_data(BindProtocol *This)
             return S_OK;
 
         bscf = BSCF_FIRSTDATANOTIFICATION;
+#ifdef __REACTOS__
         if(hres == S_FALSE)
             bscf |= BSCF_LASTDATANOTIFICATION|BSCF_DATAFULLYAVAILABLE;
+        else
+            bscf |= This->bscf & (BSCF_LASTDATANOTIFICATION|BSCF_DATAFULLYAVAILABLE);
+#else
+        if(hres == S_FALSE)
+            bscf |= BSCF_LASTDATANOTIFICATION|BSCF_DATAFULLYAVAILABLE;
+#endif
 
         if(!This->reported_mime) {
             BSTR raw_uri;

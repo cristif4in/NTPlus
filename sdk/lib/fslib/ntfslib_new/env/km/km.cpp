@@ -21,6 +21,8 @@ extern "C" {
 void*
 NtfsAllocatePoolWithTag(POOL_TYPE PoolType, size_t Size, ULONG Tag)
 {
+    if (PoolType == NonPagedPool)
+        PoolType = NonPagedPoolNx;
     return ExAllocatePoolWithTag(PoolType, Size, Tag);
 }
 
@@ -317,7 +319,7 @@ NtfsCacheWriteBackOne(_In_ PDEVICE_OBJECT Owner,
     PDEVICE_OBJECT Target = NULL;
     ULONGLONG Generation = 0;
 
-    Staged = (PUCHAR)ExAllocatePoolUninitialized(NonPagedPool,
+    Staged = (PUCHAR)ExAllocatePoolUninitialized(NonPagedPoolNx,
                                                 NTFS_CACHE_BLOCK_SIZE, 'CftN');
     if (!Staged)
         return STATUS_INSUFFICIENT_RESOURCES;
@@ -586,7 +588,7 @@ NtfsCacheInstall(_In_ PDEVICE_OBJECT Owner,
     }
     if (!Slot->Data)
     {
-        Slot->Data = (PUCHAR)ExAllocatePoolUninitialized(NonPagedPool,
+        Slot->Data = (PUCHAR)ExAllocatePoolUninitialized(NonPagedPoolNx,
                                                          NTFS_CACHE_BLOCK_SIZE,
                                                          'CftN');
         if (!Slot->Data)
@@ -627,17 +629,11 @@ NtfsDiskInitializeKm(
     return STATUS_SUCCESS;
 }
 
-NTSTATUS
-NtfsDiskPrepareMountKm(
-    _In_ PDEVICE_OBJECT DeviceObject,
-    _In_ ULONG SectorBytes)
+static
+VOID
+NtfsCacheDiscardOwner(_In_ PDEVICE_OBJECT DeviceObject)
 {
-    NTSTATUS Status;
     ULONG Index;
-
-    Status = NtfsDiskInitializeKm(DeviceObject, SectorBytes);
-    if (!NT_SUCCESS(Status))
-        return Status;
 
     /*
      * Failed mount probes cache clean data from raw volumes. A formatter writes
@@ -657,8 +653,27 @@ NtfsDiskPrepareMountKm(
         }
     }
     ExReleaseFastMutex(&NtfsCacheMutex);
+}
 
+NTSTATUS
+NtfsDiskPrepareMountKm(
+    _In_ PDEVICE_OBJECT DeviceObject,
+    _In_ ULONG SectorBytes)
+{
+    NTSTATUS Status;
+
+    Status = NtfsDiskInitializeKm(DeviceObject, SectorBytes);
+    if (!NT_SUCCESS(Status))
+        return Status;
+
+    NtfsCacheDiscardOwner(DeviceObject);
     return STATUS_SUCCESS;
+}
+
+VOID
+NtfsDiskReleaseKm(_In_ PDEVICE_OBJECT DeviceObject)
+{
+    NtfsCacheDiscardOwner(DeviceObject);
 }
 
 typedef struct _NTFS_DISK_IO_CONTEXT
@@ -919,7 +934,7 @@ NtfsReadVolumeContext(_In_opt_ void* Context,
             if (!NtfsCacheCopyOut(DeviceObject, Block, BlockOffset, Chunk, Out))
             {
                 PUCHAR BlockData = (PUCHAR)ExAllocatePoolUninitialized(
-                    NonPagedPool, NTFS_CACHE_BLOCK_SIZE, 'CftN');
+                    NonPagedPoolNx, NTFS_CACHE_BLOCK_SIZE, 'CftN');
 
                 if (!BlockData)
                     break;
@@ -1081,7 +1096,7 @@ NtfsWriteVolumeContext(_In_opt_ void* Context,
             if (!Absorbed)
             {
                 PUCHAR Staged = (PUCHAR)ExAllocatePoolUninitialized(
-                    NonPagedPool, NTFS_CACHE_BLOCK_SIZE, 'CftN');
+                    NonPagedPoolNx, NTFS_CACHE_BLOCK_SIZE, 'CftN');
 
                 if (Staged)
                 {

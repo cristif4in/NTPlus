@@ -940,6 +940,8 @@ HKLM,"SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\MyComputer\DefragPath",
 HKLM,"SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\MyComputer\DefragPath","",0x00020000,"%SystemRoot%\system32\dfrg.msc %c:"
 HKLM,"SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\MyComputer\BackupPath",,0x00000012
 HKLM,"SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\MyComputer\BackupPath","",0x00020000,"%SystemRoot%\system32\ntbackup.exe"
+HKLM,"SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\HideDesktopIcons\ClassicStartMenu","{871C5380-42A0-1069-A2EA-08002B30309D}",0x00010001,1
+HKLM,"SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\HideDesktopIcons\NewStartPanel","{871C5380-42A0-1069-A2EA-08002B30309D}",0x00010001,1
 
 HKLM,"SOFTWARE\Microsoft\Windows\CurrentVersion\Run",,0x00000012
 HKLM,"SOFTWARE\Microsoft\Windows\CurrentVersion\RunOnce",,0x00000012
@@ -6236,7 +6238,7 @@ HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Windows",,0x00000012
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Windows","AppInit_DLLs",0x00000000,""
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Windows","DesktopHeapLogging",0x00010001,0x1
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Windows","DeviceNotSelectedTimeout",0x00000000,"15"
-HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Windows","DisplayVersion",0x00010001,0x1
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Windows","DisplayVersion",0x00010001,0x0
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Windows","GDIProcessHandleQuota",0x00010001,0x2710
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Windows","Spooler",0x00000000,"yes"
 HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Windows","swapdisk",0x00000000,""

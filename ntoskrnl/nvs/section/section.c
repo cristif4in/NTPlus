@@ -11,6 +11,7 @@
 
 #define MI_SEGMENT_CHUNK_SHIFT  9
 #define MI_SEGMENT_CHUNK_PAGES  (1ULL << MI_SEGMENT_CHUNK_SHIFT)
+#define MI_SEGMENT_FIRST_CHUNK_PAGES 16ULL
 #define MI_PAGE_ALIGN_DOWN(a)   ((a) & ~((ULONG64)PAGE_SIZE - 1))
 #define MI_PAGE_ALIGN_UP(a)     (((a) + PAGE_SIZE - 1) & ~((ULONG64)PAGE_SIZE - 1))
 #define MI_VAD_START(v)         ((v)->Node.StartingVpn << PAGE_SHIFT)
@@ -32,6 +33,36 @@ MiSegmentSize(
     return (ULONG64)MI_ATOMIC_READ64(&Segment->SizeInBytes);
 }
 
+FORCEINLINE
+ULONG64
+MiSegmentChunkNumber(
+    _In_ ULONG64 Page)
+{
+    if (Page < MI_SEGMENT_FIRST_CHUNK_PAGES)
+        return 0;
+
+    return 1 + ((Page - MI_SEGMENT_FIRST_CHUNK_PAGES) >> MI_SEGMENT_CHUNK_SHIFT);
+}
+
+FORCEINLINE
+ULONG64
+MiSegmentChunkFirstPage(
+    _In_ ULONG64 Number)
+{
+    if (Number == 0)
+        return 0;
+
+    return MI_SEGMENT_FIRST_CHUNK_PAGES + ((Number - 1) << MI_SEGMENT_CHUNK_SHIFT);
+}
+
+FORCEINLINE
+ULONG64
+MiSegmentChunkPages(
+    _In_ ULONG64 Number)
+{
+    return (Number == 0) ? MI_SEGMENT_FIRST_CHUNK_PAGES : MI_SEGMENT_CHUNK_PAGES;
+}
+
 static VOID MiSegmentReleasePage(_Inout_ PMI_SEGMENT Segment, _Inout_ PMI_PTE Proto, _In_ ULONG Frame);
 
 static
@@ -41,8 +72,9 @@ MiSegmentProto(
     _In_ ULONG64 Page)
 {
     PMI_PTE *Directory = MI_ATOMIC_READ_POINTER(&Segment->Chunk);
+    ULONG64 Number = MiSegmentChunkNumber(Page);
 
-    return &Directory[Page >> MI_SEGMENT_CHUNK_SHIFT][Page & (MI_SEGMENT_CHUNK_PAGES - 1)];
+    return &Directory[Number][Page - MiSegmentChunkFirstPage(Number)];
 }
 
 static
@@ -61,12 +93,55 @@ MiSegmentDefaultProto(
 }
 
 static
+PLIST_ENTRY
+MiSegmentChunkBucket(
+    _In_ PMI_SYSTEM System,
+    _In_ ULONG64 PageNumber)
+{
+    return &System->SegmentChunkHash[PageNumber & (RTL_NUMBER_OF(System->SegmentChunkHash) - 1)];
+}
+
+static
+VOID
+MiSegmentLinkChunksLocked(
+    _Inout_ PMI_SEGMENT Segment)
+{
+    PMI_CHUNK_INDEX Index;
+    ULONG i;
+
+    for (Index = Segment->ChunkIndex; Index != NULL && !Index->Linked; Index = Index->Next)
+    {
+        for (i = 0; i < Index->PageCount; i++)
+            InsertTailList(MiSegmentChunkBucket(Segment->System, (Index->Base >> PAGE_SHIFT) + i), &Index->Page[i].Link);
+        Index->Linked = TRUE;
+    }
+}
+
+static
+VOID
+MiSegmentUnlinkChunksLocked(
+    _Inout_ PMI_SEGMENT Segment)
+{
+    PMI_CHUNK_INDEX Index;
+    ULONG i;
+
+    for (Index = Segment->ChunkIndex; Index != NULL; Index = Index->Next)
+    {
+        if (!Index->Linked)
+            continue;
+        for (i = 0; i < Index->PageCount; i++)
+            RemoveEntryList(&Index->Page[i].Link);
+        Index->Linked = FALSE;
+    }
+}
+
+static
 NTSTATUS
 MiSegmentGrow(
     _Inout_ PMI_SEGMENT Segment,
     _In_ ULONG64 NewPageCount)
 {
-    ULONG64 Needed = (NewPageCount + MI_SEGMENT_CHUNK_PAGES - 1) >> MI_SEGMENT_CHUNK_SHIFT;
+    ULONG64 Needed = (NewPageCount != 0) ? MiSegmentChunkNumber(NewPageCount - 1) + 1 : 0;
     ULONG64 Page;
 
     if (Needed > Segment->ChunkCapacity)
@@ -95,12 +170,32 @@ MiSegmentGrow(
 
     while (Segment->ChunkCount < Needed)
     {
-        PMI_PTE Chunk = MI_ALLOCATE(MI_SEGMENT_CHUNK_PAGES * sizeof(MI_PTE));
+        ULONG64 Entries = MiSegmentChunkPages(Segment->ChunkCount);
+        PMI_PTE Chunk = MI_ALLOCATE(Entries * sizeof(MI_PTE));
+        PMI_CHUNK_INDEX Index;
 
         if (Chunk == NULL)
             return STATUS_INSUFFICIENT_RESOURCES;
 
-        RtlZeroMemory(Chunk, MI_SEGMENT_CHUNK_PAGES * sizeof(MI_PTE));
+        Index = MI_ALLOCATE(sizeof(*Index));
+        if (Index == NULL)
+        {
+            MI_FREE(Chunk);
+            return STATUS_INSUFFICIENT_RESOURCES;
+        }
+
+        RtlZeroMemory(Chunk, Entries * sizeof(MI_PTE));
+        RtlZeroMemory(Index, sizeof(*Index));
+        Index->Segment = Segment;
+        Index->Base = (ULONG64)(ULONG_PTR)Chunk;
+        Index->Number = Segment->ChunkCount;
+        Index->PageCount = (ULONG)(((Index->Base + Entries * sizeof(MI_PTE) - 1) >> PAGE_SHIFT) -
+                                   (Index->Base >> PAGE_SHIFT) + 1);
+        MI_ASSERT(Index->PageCount <= RTL_NUMBER_OF(Index->Page));
+        Index->Page[0].Index = Index;
+        Index->Page[1].Index = Index;
+        Index->Next = Segment->ChunkIndex;
+        Segment->ChunkIndex = Index;
         Segment->Chunk[Segment->ChunkCount++] = Chunk;
     }
 
@@ -227,6 +322,7 @@ MiSegmentDelete(
         if (Segment->ActiveWriters == 0)
         {
             RemoveEntryList(&Segment->SystemLink);
+            MiSegmentUnlinkChunksLocked(Segment);
             Listed = FALSE;
         }
         MI_SPIN_RELEASE(&System->SegmentListLock, OldIrql);
@@ -259,6 +355,15 @@ MiSegmentDelete(
 
     for (i = 0; i < Segment->ChunkCount; i++)
         MI_FREE(Segment->Chunk[i]);
+
+    while (Segment->ChunkIndex != NULL)
+    {
+        PMI_CHUNK_INDEX Index = Segment->ChunkIndex;
+
+        MI_ASSERT(!Index->Linked);
+        Segment->ChunkIndex = Index->Next;
+        MI_FREE(Index);
+    }
 
     if (Segment->Layout != NULL)
         MI_FREE(Segment->Layout);
@@ -393,6 +498,7 @@ MiSegmentCreateEx(
 
     MI_SPIN_ACQUIRE(&System->SegmentListLock, &OldIrql);
     InsertTailList(&System->SegmentList, &Segment->SystemLink);
+    MiSegmentLinkChunksLocked(Segment);
     MI_SPIN_RELEASE(&System->SegmentListLock, OldIrql);
 
     *SegmentOut = Segment;
@@ -660,6 +766,7 @@ MiSegmentRelease(
     PMI_SYSTEM System = Segment->System;
     PMI_SEGMENT Victim = NULL;
     BOOLEAN Closed = FALSE;
+    BOOLEAN Exceeded = FALSE;
     KIRQL OldIrql;
 
     if (DeferredDelete != NULL)
@@ -690,14 +797,7 @@ MiSegmentRelease(
         Segment->State = MI_SEGMENT_UNUSED;
         InsertTailList(&System->UnusedSegmentList, &Segment->UnusedLink);
         System->UnusedSegmentCount++;
-
-        if (System->UnusedSegmentCount > System->UnusedSegmentLimit)
-        {
-            Victim = CONTAINING_RECORD(System->UnusedSegmentList.Flink, MI_SEGMENT, UnusedLink);
-            RemoveEntryList(&Victim->UnusedLink);
-            System->UnusedSegmentCount--;
-            Victim->State = MI_SEGMENT_DELETING;
-        }
+        Exceeded = System->UnusedSegmentCount > System->UnusedSegmentLimit;
     }
     else
     {
@@ -707,6 +807,9 @@ MiSegmentRelease(
     }
 
     MI_SPIN_RELEASE(&System->SegmentListLock, OldIrql);
+
+    if (Exceeded && System->UnusedSegmentsExceeded != NULL)
+        System->UnusedSegmentsExceeded(System);
 
     if (DeferredDelete != NULL)
         *DeferredDelete = Victim;
@@ -764,6 +867,39 @@ MiSegmentPurgeUnused(
     return Purged;
 }
 
+ULONG
+MiSegmentTrimUnused(
+    _Inout_ PMI_SYSTEM System)
+{
+    ULONG Trimmed = 0;
+
+    for (;;)
+    {
+        PMI_SEGMENT Victim = NULL;
+        KIRQL OldIrql;
+
+        MI_SPIN_ACQUIRE(&System->SegmentListLock, &OldIrql);
+
+        if (System->UnusedSegmentCount > System->UnusedSegmentLimit && !IsListEmpty(&System->UnusedSegmentList))
+        {
+            Victim = CONTAINING_RECORD(System->UnusedSegmentList.Flink, MI_SEGMENT, UnusedLink);
+            RemoveEntryList(&Victim->UnusedLink);
+            System->UnusedSegmentCount--;
+            Victim->State = MI_SEGMENT_DELETING;
+        }
+
+        MI_SPIN_RELEASE(&System->SegmentListLock, OldIrql);
+
+        if (Victim == NULL)
+            break;
+
+        MiSegmentDelete(Victim, TRUE);
+        Trimmed++;
+    }
+
+    return Trimmed;
+}
+
 static
 PMI_SEGMENT
 MiSegmentFromPrototype(
@@ -772,27 +908,23 @@ MiSegmentFromPrototype(
     _Out_ PULONG64 Page)
 {
     PMI_SEGMENT Found = NULL;
+    PLIST_ENTRY Bucket;
     PLIST_ENTRY Link;
     KIRQL OldIrql;
 
     MI_SPIN_ACQUIRE(&System->SegmentListLock, &OldIrql);
 
-    for (Link = System->SegmentList.Flink; Link != &System->SegmentList && Found == NULL; Link = Link->Flink)
+    Bucket = MiSegmentChunkBucket(System, PteAddress >> PAGE_SHIFT);
+    for (Link = Bucket->Flink; Link != Bucket; Link = Link->Flink)
     {
-        PMI_SEGMENT Segment = CONTAINING_RECORD(Link, MI_SEGMENT, SystemLink);
-        ULONG64 i;
+        PMI_CHUNK_INDEX Index = CONTAINING_RECORD(Link, MI_CHUNK_LINK, Link)->Index;
 
-        for (i = 0; i < Segment->ChunkCount; i++)
+        if (PteAddress >= Index->Base && PteAddress < Index->Base + MiSegmentChunkPages(Index->Number) * sizeof(MI_PTE))
         {
-            ULONG64 Base = (ULONG64)(ULONG_PTR)Segment->Chunk[i];
-
-            if (PteAddress >= Base && PteAddress < Base + MI_SEGMENT_CHUNK_PAGES * sizeof(MI_PTE))
-            {
-                *Page = (i << MI_SEGMENT_CHUNK_SHIFT) + (PteAddress - Base) / sizeof(MI_PTE);
-                Segment->ActiveWriters++;
-                Found = Segment;
-                break;
-            }
+            *Page = MiSegmentChunkFirstPage(Index->Number) + (PteAddress - Index->Base) / sizeof(MI_PTE);
+            Index->Segment->ActiveWriters++;
+            Found = Index->Segment;
+            break;
         }
     }
 
@@ -2097,6 +2229,7 @@ MiSegmentExtend(
 
                 MI_SPIN_ACQUIRE(&Segment->System->SegmentListLock, &OldIrql);
                 Status = MiSegmentGrow(Segment, NewPages);
+                MiSegmentLinkChunksLocked(Segment);
                 MI_SPIN_RELEASE(&Segment->System->SegmentListLock, OldIrql);
             }
         }

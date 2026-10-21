@@ -20,7 +20,7 @@ static const WCHAR immersive_dark_mode_propW[] = L"ReactOS.Dwm.ImmersiveDarkMode
 #define CAPTION_GLOW_RADIUS 5
 #define CAPTION_GLOW_PASSES 3
 #define CAPTION_GLOW_GAIN   3
-#define CAPTION_GLOW_LIGHT  35
+#define CAPTION_GLOW_LIGHT  21
 
 #define CAPTION_BUTTON_WIDTH_UNITS  46
 #define CAPTION_BUTTON_HEIGHT_UNITS 32
@@ -357,7 +357,8 @@ HRESULT WINAPI ThemeDrawCaptionText(PDRAW_CONTEXT pcontext, RECT* pRect, int iPa
 
     if (pcontext->DarkMode)
         textColor = pcontext->Active ? RGB(255, 255, 255) : RGB(160, 160, 160);
-    else
+    else if (FAILED(GetThemeColor(pcontext->theme, WP_CAPTION, pcontext->Active ? CS_ACTIVE : CS_INACTIVE,
+                                  TMT_TEXTCOLOR, &textColor)))
         textColor = GetThemeSysColor(pcontext->theme, pcontext->Active ? COLOR_CAPTIONTEXT : COLOR_INACTIVECAPTIONTEXT);
 
     GetThemeEnumValue(pcontext->theme, iPartId, iStateId, TMT_CONTENTALIGNMENT, &align);
@@ -769,7 +770,7 @@ void ThemeCalculateCaptionButtonsPos(HWND hWnd, HTHEME htheme)
 static COLORREF
 ThemeDarkCaptionColor(PDRAW_CONTEXT pcontext)
 {
-    return pcontext->Active ? RGB(32, 32, 32) : RGB(43, 43, 43);
+    return pcontext->Active ? RGB(28, 32, 40) : RGB(39, 43, 51);
 }
 
 static COLORREF
@@ -1219,10 +1220,22 @@ ThemeDwmDrawCaptionButton(HDC hDC, const RECT *prc, UINT Button, ULONG State, BO
         break;
     }
 
-    hTheme = OpenThemeData(NULL, L"WINDOW");
+    hTheme = UXTHEME_OpenNcThemeData(NULL, L"WINDOW", OTD_NONCLIENT);
     if (!hTheme)
         return FALSE;
-    DrawThemeBackground(hTheme, hDC, iPart, iState, prc, NULL);
+    if (iPart == WP_CLOSEBUTTON &&
+        (State & DWM_CAPTION_STATE_DISABLED(DWM_CAPTION_BUTTON_MAXIMIZE)) &&
+        (State & DWM_CAPTION_STATE_DISABLED(DWM_CAPTION_BUTTON_MINIMIZE)))
+    {
+        ZeroMemory(&context, sizeof(context));
+        context.hDC = hDC;
+        context.theme = hTheme;
+        ThemeDrawCaptionGroupStart(&context, iPart, iState, prc);
+    }
+    else
+    {
+        DrawThemeBackground(hTheme, hDC, iPart, iState, prc, NULL);
+    }
     CloseThemeData(hTheme);
     return TRUE;
 }
@@ -1331,7 +1344,7 @@ ThemeDrawCaption(PDRAW_CONTEXT pcontext, RECT* prcCurrent, DWORD htHot, DWORD ht
         DrawThemeBackground(pcontext->theme, pcontext->hDC, iPart, iState, &rcPart, NULL);
 
     rcContent = rcPart;
-    rcContent.top += pcontext->wi.cyWindowBorders;
+    rcContent.top += ThemeGetMaximizedTopOverhang(&pcontext->wi);
 
     /* Add a padding around the objects of the caption */
     InflateRect(&rcPart, -(int)pcontext->wi.cyWindowBorders-BUTTON_GAP_SIZE,

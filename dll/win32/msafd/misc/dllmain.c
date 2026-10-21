@@ -678,6 +678,84 @@ TranslateNtStatusError(NTSTATUS Status)
     }
 }
 
+typedef struct _MSAFD_THREAD_EVENT
+{
+    HANDLE Event;
+    BOOLEAN Busy;
+} MSAFD_THREAD_EVENT, *PMSAFD_THREAD_EVENT;
+
+static DWORD MsafdThreadEventIndex = FLS_OUT_OF_INDEXES;
+
+static VOID WINAPI
+MsafdFreeThreadEvent(
+    _In_ PVOID Data)
+{
+    PMSAFD_THREAD_EVENT Entry = Data;
+
+    if (!Entry)
+        return;
+    if (Entry->Event)
+        NtClose(Entry->Event);
+    HeapFree(GlobalHeap, 0, Entry);
+}
+
+NTSTATUS
+MsafdAcquireEvent(
+    _Out_ PHANDLE Event,
+    _Out_ PBOOLEAN Shared)
+{
+    PMSAFD_THREAD_EVENT Entry;
+    NTSTATUS Status;
+
+    *Shared = FALSE;
+    if (MsafdThreadEventIndex != FLS_OUT_OF_INDEXES)
+    {
+        Entry = FlsGetValue(MsafdThreadEventIndex);
+        if (!Entry)
+        {
+            Entry = HeapAlloc(GlobalHeap, HEAP_ZERO_MEMORY, sizeof(*Entry));
+            if (Entry)
+            {
+                Status = NtCreateEvent(&Entry->Event, EVENT_ALL_ACCESS,
+                                       NULL, SynchronizationEvent, FALSE);
+                if (!NT_SUCCESS(Status) || !FlsSetValue(MsafdThreadEventIndex, Entry))
+                {
+                    MsafdFreeThreadEvent(Entry);
+                    Entry = NULL;
+                }
+            }
+        }
+        if (Entry && !Entry->Busy)
+        {
+            Entry->Busy = TRUE;
+            *Event = Entry->Event;
+            *Shared = TRUE;
+            return STATUS_SUCCESS;
+        }
+    }
+    return NtCreateEvent(Event, EVENT_ALL_ACCESS, NULL, SynchronizationEvent, FALSE);
+}
+
+VOID
+MsafdReleaseEvent(
+    _In_ HANDLE Event,
+    _In_ BOOLEAN Shared,
+    _In_ BOOLEAN Reset)
+{
+    PMSAFD_THREAD_EVENT Entry;
+
+    if (!Shared)
+    {
+        NtClose(Event);
+        return;
+    }
+    if (Reset)
+        NtResetEvent(Event, NULL);
+    Entry = FlsGetValue(MsafdThreadEventIndex);
+    if (Entry)
+        Entry->Busy = FALSE;
+}
+
 VOID
 MsafdWaitForAlert(
     _In_ HANDLE hObject)
@@ -2074,9 +2152,9 @@ MsafdCompleteConnect(
 
     if (Socket && Socket->SharedData->State != SocketClosed)
     {
-        Socket->SharedData->SocketLastError = TranslateNtStatusError(IoStatusBlock->Status);
         if (IoStatusBlock->Status == STATUS_SUCCESS)
         {
+            Socket->SharedData->SocketLastError = NO_ERROR;
             Socket->SharedData->State = SocketConnected;
             Socket->TdiConnectionHandle = (HANDLE)IoStatusBlock->Information;
             Socket->SharedData->ConnectTime = GetCurrentTimeInSeconds();
@@ -2880,6 +2958,45 @@ WSPIoctl(IN  SOCKET Handle,
                 }
             }
             Socket->SharedData->NonBlocking = NonBlocking ? 1 : 0;
+            if (lpOverlapped && !lpCompletionRoutine &&
+                !(Socket->SharedData->CreateFlags & SO_SYNCHRONOUS_NONALERT))
+            {
+                AFD_INFO InfoData;
+                HANDLE SockEvent;
+                NTSTATUS Status;
+
+                Status = NtCreateEvent(&SockEvent, EVENT_ALL_ACCESS, NULL, SynchronizationEvent, FALSE);
+                if (!NT_SUCCESS(Status))
+                {
+                    Errno = WSAENOBUFS;
+                    break;
+                }
+                RtlZeroMemory(&InfoData, sizeof(InfoData));
+                InfoData.InformationClass = AFD_INFO_BLOCKING_MODE;
+                InfoData.Information.Boolean = NonBlocking;
+                lpOverlapped->Internal = STATUS_PENDING;
+                Status = NtDeviceIoControlFile((HANDLE)Socket->Handle,
+                                               SockEvent,
+                                               NULL,
+                                               lpOverlapped,
+                                               (PIO_STATUS_BLOCK)&lpOverlapped->Internal,
+                                               IOCTL_AFD_SET_INFO,
+                                               &InfoData,
+                                               sizeof(InfoData),
+                                               NULL,
+                                               0);
+                if (Status == STATUS_PENDING)
+                {
+                    MsafdWaitForAlert(SockEvent);
+                    Status = (NTSTATUS)lpOverlapped->Internal;
+                }
+                NtClose(SockEvent);
+                NeedsCompletion = FALSE;
+                Errno = MsafdReturnWithErrno(Status, NULL, 0, NULL);
+                if (Errno == NO_ERROR)
+                    Ret = NO_ERROR;
+                break;
+            }
             Errno = SetSocketInformation(Socket, AFD_INFO_BLOCKING_MODE, &NonBlocking, NULL, NULL, NULL, NULL);
             if (Errno == NO_ERROR)
                 Ret = NO_ERROR;
@@ -5142,6 +5259,7 @@ DllMain(HANDLE hInstDll,
 
         /* Heap to use when allocating */
         GlobalHeap = GetProcessHeap();
+        MsafdThreadEventIndex = FlsAlloc(MsafdFreeThreadEvent);
 
         /* Initialize the lock that protects our socket list */
         InitializeCriticalSection(&SocketListLock);
@@ -5160,6 +5278,8 @@ DllMain(HANDLE hInstDll,
 
         /* Delete the socket list lock */
         DeleteCriticalSection(&SocketListLock);
+        if (MsafdThreadEventIndex != FLS_OUT_OF_INDEXES)
+            FlsFree(MsafdThreadEventIndex);
 
         break;
     }

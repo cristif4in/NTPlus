@@ -495,6 +495,10 @@ NtfsMountVolume(IN PDEVICE_OBJECT TargetDeviceObject,
     InitializeListHead(&VolCB->IdleFcbList);
     VolCB->IdleFcbCount = 0;
     InitializeListHead(&VolCB->StreamList);
+    for (Index = 0; Index < NTFS_STREAM_HASH_BUCKETS; Index++)
+        InitializeListHead(&VolCB->StreamHash[Index]);
+    for (Index = 0; Index < NTFS_LINK_HASH_BUCKETS; Index++)
+        InitializeListHead(&VolCB->LinkHash[Index]);
     InitializeListHead(&VolCB->NotifyList);
     FsRtlNotifyInitializeSync(&VolCB->NotifySync);
     FsRtlInitializeTunnelCache(&VolCB->Tunnel);
@@ -532,6 +536,8 @@ NtfsMountVolume(IN PDEVICE_OBJECT TargetDeviceObject,
     Status = STATUS_SUCCESS;
 
 Cleanup:
+    if (!NT_SUCCESS(Status))
+        NtfsDiskReleaseKm(TargetDeviceObject);
     return Status;
 }
 
@@ -628,7 +634,7 @@ NtfsRecordNameMissing(_In_ PVolumeContextBlock VolCB,
 
     Length = NtfsMissingNameLength(Name, Length);
     Missing = (PNtfsMissingName)ExAllocatePoolUninitialized(
-        NonPagedPool,
+        NonPagedPoolNx,
         FIELD_OFFSET(NtfsMissingName, Name) + Length * sizeof(WCHAR),
         TAG_NTFS);
     if (!Missing)
@@ -887,7 +893,7 @@ NtfsCacheRecord(_In_ PVolumeContextBlock VolCB,
     }
 
     New = (PNtfsCachedRecord)ExAllocatePoolUninitialized(
-        NonPagedPool,
+        NonPagedPoolNx,
         FIELD_OFFSET(NtfsCachedRecord, Name) + Length * sizeof(WCHAR),
         TAG_NTFS);
     if (!New)

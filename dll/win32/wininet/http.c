@@ -2064,12 +2064,54 @@ static BOOL HTTP_DealWithProxy(appinfo_t *hIC, http_session_t *session, http_req
     return TRUE;
 }
 
+#ifdef __REACTOS__
+static server_addr_t *copy_resolved_address(server_t *server)
+{
+    server_addr_t *src = NULL, *copy = NULL, *iter;
+    server_t *other;
+    unsigned count = 0, i;
+
+    EnterCriticalSection(&connection_pool_cs);
+
+    LIST_FOR_EACH_ENTRY(other, &connection_pool, server_t, entry) {
+        if(other != server && other->addr && !wcsicmp(other->name, server->name)) {
+            src = other->addr;
+            break;
+        }
+    }
+
+    for(iter = src; iter; iter = iter->next)
+        count++;
+
+    if(count)
+        copy = calloc(count, sizeof(*copy));
+    if(copy) {
+        for(iter = src, i = 0; iter; iter = iter->next, i++) {
+            copy[i] = *iter;
+            copy[i].next = iter->next ? &copy[i + 1] : NULL;
+            if(copy[i].addr.ss_family == AF_INET)
+                ((struct sockaddr_in *)&copy[i].addr)->sin_port = htons(server->port);
+            else if(copy[i].addr.ss_family == AF_INET6)
+                ((struct sockaddr_in6 *)&copy[i].addr)->sin6_port = htons(server->port);
+        }
+    }
+
+    LeaveCriticalSection(&connection_pool_cs);
+    return copy;
+}
+
+#endif
 static DWORD HTTP_ResolveName(http_request_t *request)
 {
     server_t *server = request->proxy ? request->proxy : request->server;
 
     if(server->addr)
         return ERROR_SUCCESS;
+
+#ifdef __REACTOS__
+    if((server->addr = copy_resolved_address(server)))
+        return ERROR_SUCCESS;
+#endif
 
     INTERNET_SendCallback(&request->hdr, request->hdr.dwContext,
                           INTERNET_STATUS_RESOLVING_NAME,
@@ -3004,7 +3046,11 @@ static DWORD refill_read_buffer(http_request_t *req, BOOL allow_blocking, DWORD 
 static BOOL netconn_end_of_data(data_stream_t *stream, http_request_t *req)
 {
     netconn_stream_t *netconn_stream = (netconn_stream_t*)stream;
+#ifdef __REACTOS__
+    return netconn_stream->content_read >= netconn_stream->content_length || !is_valid_netconn(req->netconn);
+#else
     return netconn_stream->content_read == netconn_stream->content_length || !is_valid_netconn(req->netconn);
+#endif
 }
 
 static DWORD netconn_read(data_stream_t *stream, http_request_t *req, BYTE *buf, DWORD size,
@@ -3014,7 +3060,14 @@ static DWORD netconn_read(data_stream_t *stream, http_request_t *req, BYTE *buf,
     DWORD res = ERROR_SUCCESS;
     int ret = 0;
 
+#ifdef __REACTOS__
+    if(netconn_stream->content_read < netconn_stream->content_length)
+        size = min(size, netconn_stream->content_length-netconn_stream->content_read);
+    else
+        size = 0;
+#else
     size = min(size, netconn_stream->content_length-netconn_stream->content_read);
+#endif
 
     if(size && is_valid_netconn(req->netconn)) {
 #ifdef __REACTOS__
@@ -5477,7 +5530,12 @@ static DWORD open_http_connection(http_request_t *request, BOOL *reusing)
 
     if (request->netconn)
     {
+#ifdef __REACTOS__
+        if (NETCON_is_alive(request->netconn) && drain_content(request, TRUE) == ERROR_SUCCESS &&
+            NETCON_is_alive(request->netconn))
+#else
         if (NETCON_is_alive(request->netconn) && drain_content(request, TRUE) == ERROR_SUCCESS)
+#endif
         {
             reset_data_stream(request);
             *reusing = TRUE;
@@ -5577,6 +5635,9 @@ static DWORD create_request(http_request_t *request, void *optional, DWORD optle
                             BOOL end_request)
 {
     BOOL redirected = FALSE, secure_proxy_connect = FALSE, loop_next;
+#ifdef __REACTOS__
+    BOOL silent_retry = FALSE;
+#endif
     WCHAR *request_header = NULL;
     INT responseLen, cnt;
     DWORD res;
@@ -5689,6 +5750,9 @@ static DWORD create_request(http_request_t *request, void *optional, DWORD optle
 #endif
         TRACE("full request -> %s\n", debugstr_a(ascii_req) );
 
+#ifdef __REACTOS__
+        if (!silent_retry)
+#endif
         INTERNET_SendCallback(&request->hdr, request->hdr.dwContext,
                               INTERNET_STATUS_SENDING_REQUEST, NULL, 0);
 
@@ -5700,6 +5764,9 @@ static DWORD create_request(http_request_t *request, void *optional, DWORD optle
             if(!reusing_connection)
                 break;
             http_release_netconn(request, FALSE);
+#ifdef __REACTOS__
+            silent_retry = TRUE;
+#endif
             loop_next = TRUE;
             continue;
         }
@@ -5709,6 +5776,9 @@ static DWORD create_request(http_request_t *request, void *optional, DWORD optle
         request->awaiting_response = !end_request;
 #endif
 
+#ifdef __REACTOS__
+        if (!silent_retry)
+#endif
         INTERNET_SendCallback(&request->hdr, request->hdr.dwContext,
                               INTERNET_STATUS_REQUEST_SENT,
                               &len, sizeof(DWORD));
@@ -5717,6 +5787,9 @@ static DWORD create_request(http_request_t *request, void *optional, DWORD optle
         {
             DWORD dwBufferSize;
 
+#ifdef __REACTOS__
+            if (!silent_retry)
+#endif
             INTERNET_SendCallback(&request->hdr, request->hdr.dwContext,
                                 INTERNET_STATUS_RECEIVING_RESPONSE, NULL, 0);
 
@@ -5731,9 +5804,15 @@ static DWORD create_request(http_request_t *request, void *optional, DWORD optle
             if(!responseLen && reusing_connection) {
                 TRACE("Connection closed by server, reconnecting\n");
                 http_release_netconn(request, FALSE);
+#ifdef __REACTOS__
+                silent_retry = TRUE;
+#endif
                 loop_next = TRUE;
                 continue;
             }
+#ifdef __REACTOS__
+            silent_retry = FALSE;
+#endif
 #ifdef __REACTOS__
             if(!responseLen) {
                 http_release_netconn(request, FALSE);

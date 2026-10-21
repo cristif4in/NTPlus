@@ -42,6 +42,8 @@ typedef struct _VolumeContextBlock
     BOOLEAN Dismounted;
     FAST_MUTEX StreamListMutex;
     LIST_ENTRY StreamList;
+    LIST_ENTRY StreamHash[256];
+    LIST_ENTRY LinkHash[256];
     PNOTIFY_SYNC NotifySync;
     LIST_ENTRY NotifyList;
     TUNNEL Tunnel;
@@ -90,6 +92,8 @@ typedef struct _VolumeContextBlock
 #define NTFS_MISSING_NAME_BUCKETS RTL_NUMBER_OF_FIELD(VolumeContextBlock, MissingNameHash)
 #define NTFS_MAX_CACHED_RECORDS 512
 #define NTFS_RECORD_CACHE_BUCKETS RTL_NUMBER_OF_FIELD(VolumeContextBlock, RecordCacheHash)
+#define NTFS_STREAM_HASH_BUCKETS RTL_NUMBER_OF_FIELD(VolumeContextBlock, StreamHash)
+#define NTFS_LINK_HASH_BUCKETS RTL_NUMBER_OF_FIELD(VolumeContextBlock, LinkHash)
 #define NTFS_MAX_IDLE_FCBS 64
 #define NTFS_INLINE_FILE_NAME_CHARS 128
 
@@ -248,6 +252,24 @@ C_ASSERT(FIELD_OFFSET(NTFS_NATIVE_LCB, FileName) == (sizeof(PVOID) == 8 ? 0x48 :
 C_ASSERT(FIELD_OFFSET(NTFS_NATIVE_LCB, CcbList) == (sizeof(PVOID) == 8 ? 0x78 : 0x48));
 C_ASSERT(FIELD_OFFSET(NTFS_NATIVE_LCB, CleanupCount) == (sizeof(PVOID) == 8 ? 0xbc : 0x84));
 C_ASSERT(sizeof(NTFS_NATIVE_LCB) == (sizeof(PVOID) == 8 ? 0xd8 : 0xa0));
+
+typedef struct _NTFS_LCB_ENTRY
+{
+    NTFS_NATIVE_LCB Lcb;
+    LIST_ENTRY HashEntry;
+} NTFS_LCB_ENTRY, *PNTFS_LCB_ENTRY;
+
+FORCEINLINE
+PLIST_ENTRY
+NtfsLinkHashBucket(_In_ PVolumeContextBlock VolCB,
+                   _In_ PNTFS_NATIVE_SCB ParentScb,
+                   _In_ PCUNICODE_STRING Name)
+{
+    ULONG Hash = NtfsHashName(Name->Buffer, Name->Length / sizeof(WCHAR)) ^
+                 (ULONG)((ULONG_PTR)ParentScb >> 4);
+
+    return &VolCB->LinkHash[Hash & (NTFS_LINK_HASH_BUCKETS - 1)];
+}
 C_ASSERT(FIELD_OFFSET(NTFS_NATIVE_CCB, FileName) == (sizeof(PVOID) == 8 ? 0x10 : 0x0c));
 C_ASSERT(FIELD_OFFSET(NTFS_NATIVE_CCB, StreamEntry) == (sizeof(PVOID) == 8 ? 0x28 : 0x1c));
 C_ASSERT(FIELD_OFFSET(NTFS_NATIVE_CCB, LcbEntry) == (sizeof(PVOID) == 8 ? 0x38 : 0x24));
@@ -267,6 +289,7 @@ typedef struct _SCB
     ERESOURCE PagingIoResource;
     FAST_MUTEX HeaderMutex;
     LIST_ENTRY ListEntry;
+    LIST_ENTRY HashEntry;
     ULONGLONG FileReference;
     AttributeType RequestedType;
     UNICODE_STRING RequestedStream;
@@ -280,6 +303,14 @@ typedef struct _SCB
     LONG UncleanCount;
     NTFS_NATIVE_SCB NativeScb;
 } StreamContextBlock, *PStreamContextBlock;
+
+FORCEINLINE
+PLIST_ENTRY
+NtfsStreamHashBucket(_In_ PVolumeContextBlock VolCB,
+                     _In_ ULONGLONG FileReference)
+{
+    return &VolCB->StreamHash[(ULONG)FileReference & (NTFS_STREAM_HASH_BUCKETS - 1)];
+}
 
 typedef struct _FCB
 {

@@ -33,7 +33,7 @@
 #include "winnls.h"
 #include "resource.h"
 #include <reactos/dwmframe.h>
-#include <reactos/trayicons.h>
+#include <reactos/colorscheme.h>
 #include <dwmapi.h>
 #endif
 
@@ -719,6 +719,33 @@ static void UXTHEME_ClearLiquidProperties(HWND hwnd, ULONG region)
     RemovePropW(hwnd, DWM_PROP_BACKDROP_REGION);
 }
 
+void UXTHEME_ClearNonClientLiquidProperties(HWND hwnd)
+{
+    UXTHEME_ClearLiquidProperties(hwnd, DWM_BACKDROP_REGION_NONCLIENT);
+}
+
+static BOOL UXTHEME_UseLightClasses(LPCWSTR classList, DWORD flags)
+{
+    if ((flags & OTD_NONCLIENT) && !lstrcmpiW(classList, L"WINDOW"))
+        return DwmSettingsReadColorScheme() == DWM_COLOR_SCHEME_LIGHT;
+    return UXTHEME_UsesDefaultSysColors();
+}
+
+static PTHEME_CLASS UXTHEME_OpenShellMaterial(DWORD scheme, UINT dpi)
+{
+    PTHEME_CLASS liquid = MSSTYLES_OpenThemeClass(DWM_SHELL_MATERIAL_APP(scheme), L"Liquid", dpi);
+    BOOL composited = FALSE;
+
+    if (liquid && (FAILED(GetThemeBool(liquid, 0, 0, TMT_COMPOSITED, &composited)) || !composited))
+    {
+        MSSTYLES_CloseThemeClass(liquid);
+        liquid = NULL;
+    }
+    if (!liquid && scheme == DWM_COLOR_SCHEME_LIGHT)
+        return UXTHEME_OpenShellMaterial(DWM_COLOR_SCHEME_DARK, dpi);
+    return liquid;
+}
+
 static void UXTHEME_ApplyLiquidProperties(HWND hwnd, LPCWSTR classList,
                                           DWORD flags, UINT dpi)
 {
@@ -726,9 +753,12 @@ static void UXTHEME_ApplyLiquidProperties(HWND hwnd, LPCWSTR classList,
     ULONG backdropType = 0, region = 0;
     PTHEME_CLASS liquid;
     BOOL composited = FALSE;
-    INT opacity = 255;
-    COLORREF color = 0;
+    BOOL shell = TRUE;
+    DWORD scheme = DWM_COLOR_SCHEME_DARK;
+    INT opacity = 255, shellOpacity;
+    COLORREF color = 0, shellColor;
     COLORREF colorization;
+    HRESULT colorizationResult;
 
     if (!IsWindow(hwnd) || GetAncestor(hwnd, GA_ROOT) != hwnd)
         return;
@@ -737,24 +767,28 @@ static void UXTHEME_ApplyLiquidProperties(HWND hwnd, LPCWSTR classList,
         role = L"NonClient";
         backdropType = DWM_BACKDROP_TRANSIENT;
         region = DWM_BACKDROP_REGION_NONCLIENT;
+        shell = FALSE;
     }
     else if (UXTHEME_ClassListContains(classList, L"TaskBar"))
     {
         role = L"Taskbar";
         backdropType = DWM_BACKDROP_TRANSIENT;
         region = DWM_BACKDROP_REGION_WINDOW;
+        scheme = DwmSettingsReadColorScheme();
     }
     else if (UXTHEME_ClassListContains(classList, L"StartMenu"))
     {
         role = L"StartMenu";
         backdropType = DWM_BACKDROP_TRANSIENT;
         region = DWM_BACKDROP_REGION_WINDOW;
+        scheme = DwmSettingsReadColorScheme();
     }
     else if (UXTHEME_ClassListContains(classList, L"FlyoutLight"))
     {
         role = L"FlyoutLight";
         backdropType = DWM_BACKDROP_TRANSIENT;
         region = DWM_BACKDROP_REGION_WINDOW;
+        scheme = DWM_COLOR_SCHEME_LIGHT;
     }
     else if (UXTHEME_ClassListContains(classList, L"FlyoutDark"))
     {
@@ -766,15 +800,8 @@ static void UXTHEME_ApplyLiquidProperties(HWND hwnd, LPCWSTR classList,
         return;
 
     liquid = NULL;
-    if (bThemeActive && !lstrcmpW(role, L"Taskbar") && ShellSystemUsesLightTheme())
-    {
-        liquid = MSSTYLES_OpenThemeClass(L"TaskbarLight", L"Liquid", dpi);
-        if (liquid && (FAILED(GetThemeBool(liquid, 0, 0, TMT_COMPOSITED, &composited)) || !composited))
-        {
-            MSSTYLES_CloseThemeClass(liquid);
-            liquid = NULL;
-        }
-    }
+    if (bThemeActive && !shell && DwmSettingsReadColorScheme() == DWM_COLOR_SCHEME_LIGHT)
+        liquid = MSSTYLES_OpenThemeClass(L"NonClientLight", L"Liquid", dpi);
     if (!liquid && bThemeActive)
         liquid = MSSTYLES_OpenThemeClass(role, L"Liquid", dpi);
     if (!liquid || FAILED(GetThemeBool(liquid, 0, 0, TMT_COMPOSITED,
@@ -789,9 +816,20 @@ static void UXTHEME_ApplyLiquidProperties(HWND hwnd, LPCWSTR classList,
         return;
     }
 
-    colorization = color;
-    GetThemeColor(liquid, 0, 0, TMT_COLORIZATIONCOLOR, &colorization);
+    colorizationResult = GetThemeColor(liquid, 0, 0, TMT_COLORIZATIONCOLOR, &colorization);
     MSSTYLES_CloseThemeClass(liquid);
+    liquid = UXTHEME_OpenShellMaterial(shell ? scheme : DwmSettingsReadColorScheme(), dpi);
+    if (liquid)
+    {
+        if (SUCCEEDED(GetThemeInt(liquid, 0, 0, TMT_OPACITY, &shellOpacity)) &&
+            shellOpacity >= 0 && shellOpacity <= 255)
+            opacity = shellOpacity;
+        if (shell && SUCCEEDED(GetThemeColor(liquid, 0, 0, TMT_FILLCOLOR, &shellColor)))
+            color = shellColor;
+        MSSTYLES_CloseThemeClass(liquid);
+    }
+    if (FAILED(colorizationResult))
+        colorization = color;
     if (region == DWM_BACKDROP_REGION_NONCLIENT && GetPropW(hwnd, DWM_PROP_CONTENT_BACKDROP))
     {
         SetPropW(hwnd, DWM_PROP_BACKDROP_COLORIZATION, (HANDLE)(ULONG_PTR)((ULONG)color + 1));
@@ -874,7 +912,8 @@ static HTHEME open_theme_data(HWND hwnd, LPCWSTR pszClassList, DWORD flags, UINT
 #ifdef __REACTOS__
         if (pszUseClassList)
             hTheme = MSSTYLES_OpenThemeClassForApp(pszAppName,
-                                                   UXTHEME_UsesDefaultSysColors() ? L"ContentLight" : NULL,
+                                                   UXTHEME_UseLightClasses(pszUseClassList, flags) ?
+                                                   L"ContentLight" : NULL,
                                                    pszUseClassList, dpi);
 #else
         if (pszUseClassList)

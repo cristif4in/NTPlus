@@ -65,6 +65,7 @@
                              _In_ PFileContextBlock FileCB)
  {
      PLIST_ENTRY StreamEntry;
+     PLIST_ENTRY Bucket;
      ULONG Count = 0;
 
      if (!FileCB->StreamCB)
@@ -72,11 +73,12 @@
 
      ASSERT(ExIsResourceAcquiredExclusiveLite(&VolCB->MetadataResource));
      ExAcquireFastMutex(&VolCB->StreamListMutex);
-     for (StreamEntry = VolCB->StreamList.Flink;
-          StreamEntry != &VolCB->StreamList;
+     Bucket = NtfsStreamHashBucket(VolCB, FileCB->StreamCB->FileReference);
+     for (StreamEntry = Bucket->Flink;
+          StreamEntry != Bucket;
           StreamEntry = StreamEntry->Flink)
      {
-         PStreamContextBlock Stream = CONTAINING_RECORD(StreamEntry, StreamContextBlock, ListEntry);
+         PStreamContextBlock Stream = CONTAINING_RECORD(StreamEntry, StreamContextBlock, HashEntry);
          PLIST_ENTRY CcbEntry;
 
          if (Stream->FileReference != FileCB->StreamCB->FileReference)
@@ -1133,12 +1135,13 @@ NtfsIsFileRecordOpen(_In_ PVolumeContextBlock VolCB,
                      _In_ ULONGLONG RecordNumber)
 {
     PLIST_ENTRY Entry;
+    PLIST_ENTRY Bucket = NtfsStreamHashBucket(VolCB, RecordNumber);
     BOOLEAN Open = FALSE;
 
     ExAcquireFastMutex(&VolCB->StreamListMutex);
-    for (Entry = VolCB->StreamList.Flink; Entry != &VolCB->StreamList; Entry = Entry->Flink)
+    for (Entry = Bucket->Flink; Entry != Bucket; Entry = Entry->Flink)
     {
-        PStreamContextBlock StreamCB = CONTAINING_RECORD(Entry, StreamContextBlock, ListEntry);
+        PStreamContextBlock StreamCB = CONTAINING_RECORD(Entry, StreamContextBlock, HashEntry);
 
         if ((StreamCB->FileReference & 0x0000FFFFFFFFFFFFULL) == RecordNumber &&
             StreamCB->ShareAccess.OpenCount != 0)
@@ -1157,11 +1160,12 @@ NtfsMarkFileRecordStreamsDeleted(_In_ PVolumeContextBlock VolCB,
                                  _In_ ULONGLONG RecordNumber)
 {
     PLIST_ENTRY Entry;
+    PLIST_ENTRY Bucket = NtfsStreamHashBucket(VolCB, RecordNumber);
 
     ExAcquireFastMutex(&VolCB->StreamListMutex);
-    for (Entry = VolCB->StreamList.Flink; Entry != &VolCB->StreamList; Entry = Entry->Flink)
+    for (Entry = Bucket->Flink; Entry != Bucket; Entry = Entry->Flink)
     {
-        PStreamContextBlock StreamCB = CONTAINING_RECORD(Entry, StreamContextBlock, ListEntry);
+        PStreamContextBlock StreamCB = CONTAINING_RECORD(Entry, StreamContextBlock, HashEntry);
 
         if ((StreamCB->FileReference & 0x0000FFFFFFFFFFFFULL) == RecordNumber)
         {
@@ -1916,11 +1920,14 @@ NtfsSetRenameInformation(_In_ PVolumeContextBlock VolCB,
             CONTAINING_RECORD(Lcb->ParentScb, StreamContextBlock, NativeScb);
 
         RemoveEntryList(&Lcb->ParentEntry);
+        RemoveEntryList(&CONTAINING_RECORD(Lcb, NTFS_LCB_ENTRY, Lcb)->HashEntry);
         Lcb->ParentScb = &NewParent->NativeScb;
         InsertTailList(&NewParent->NativeScb.ChildLcbList, &Lcb->ParentEntry);
         ExFreePoolWithTag(Lcb->FileName.Buffer, TAG_NTFS);
         Lcb->FileName.Buffer = NewLeafBuffer;
         Lcb->FileName.Length = Lcb->FileName.MaximumLength = NewLeaf.Length;
+        InsertTailList(NtfsLinkHashBucket(VolCB, Lcb->ParentScb, &Lcb->FileName),
+                       &CONTAINING_RECORD(Lcb, NTFS_LCB_ENTRY, Lcb)->HashEntry);
         NewLeafBuffer = NULL;
         NewParent = NULL;
         NtfsDereferenceStreamContext(VolCB, OldParent);

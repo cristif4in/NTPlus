@@ -131,8 +131,6 @@ format_main(
 
     for (i = 1; i < argc; i++)
     {
-        ConPrintf(StdOut, L"%s\n", argv[i]);
-
         if (HasPrefix(argv[i], L"fs=", &pszSuffix))
         {
             /* fs=<fs> */
@@ -276,7 +274,10 @@ format_main(
 done:
     ConPuts(StdOut, L"\n");
     if (Success)
+    {
+        RefreshVolumeList();
         ConResPrintf(StdOut, IDS_FORMAT_SUCCESS);
+    }
     else
         ConResPrintf(StdOut, IDS_FORMAT_FAIL);
 

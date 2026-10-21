@@ -259,6 +259,10 @@ struct request
     unsigned int websocket_send_buffer_size, websocket_set_send_buffer_size;
     int reply_len;
     enum request_state state;
+#ifdef __REACTOS__
+    WCHAR *username;
+    WCHAR *password;
+#endif
 };
 
 enum socket_state
@@ -445,6 +449,9 @@ BOOL netconn_wait_overlapped_result( struct netconn *conn, WSAOVERLAPPED *ovr, D
 void netconn_cancel_io( struct netconn *conn );
 DWORD netconn_set_timeout( struct netconn *, BOOL, int );
 BOOL netconn_is_alive( struct netconn * );
+#ifdef __REACTOS__
+DWORD netconn_renegotiate( struct netconn *conn, const WCHAR *hostname, CredHandle *cred_handle );
+#endif
 BOOL netconn_is_valid( struct netconn * );
 const void *netconn_get_certificate( struct netconn * );
 int netconn_get_cipher_strength( struct netconn * );

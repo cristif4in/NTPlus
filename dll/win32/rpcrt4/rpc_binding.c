@@ -1066,7 +1066,11 @@ RPC_STATUS WINAPI RpcImpersonateClient(RPC_BINDING_HANDLE BindingHandle)
     TRACE("(%p)\n", BindingHandle);
 
     if (!BindingHandle) BindingHandle = I_RpcGetCurrentCallHandle();
+#ifdef __REACTOS__
+    if (!BindingHandle) return RPC_S_NO_CALL_ACTIVE;
+#else
     if (!BindingHandle) return RPC_S_INVALID_BINDING;
+#endif
 
     bind = BindingHandle;
     if (bind->FromConn)
@@ -2020,3 +2024,25 @@ RPC_STATUS WINAPI I_RpcBindingInqLocalClientPID(RPC_BINDING_HANDLE ClientBinding
 
     return connection->ops->inquire_client_pid(connection, ClientPID);
 }
+
+#ifdef __REACTOS__
+RPC_STATUS WINAPI I_RpcOpenClientProcess(RPC_BINDING_HANDLE Binding, ULONG DesiredAccess, void **ClientProcess)
+{
+    RPC_STATUS status;
+    HANDLE process;
+    ULONG pid;
+
+    TRACE("%p %lu %p\n", Binding, DesiredAccess, ClientProcess);
+
+    status = I_RpcBindingInqLocalClientPID(Binding, &pid);
+    if (status != RPC_S_OK)
+        return status;
+
+    process = OpenProcess(DesiredAccess, FALSE, pid);
+    if (!process)
+        return GetLastError();
+
+    *ClientProcess = process;
+    return RPC_S_OK;
+}
+#endif

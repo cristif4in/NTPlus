@@ -1144,6 +1144,7 @@ NtSetValueKey(IN HANDLE KeyHandle,
         _SEH2_TRY
         {
             ProbeForRead(Data, DataSize, 1);
+            (void)*(volatile UCHAR *)Data;
         }
         _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
         {
@@ -1691,9 +1692,6 @@ NtInitializeRegistry(IN USHORT Flag)
     if (KeGetPreviousMode() == UserMode)
         return ZwInitializeRegistry(Flag);
 
-    /* Enough of the system has booted by now */
-    Ki386PerfEnd();
-
     /* Validate flag */
     if (Flag > CM_BOOT_FLAG_MAX) return STATUS_INVALID_PARAMETER;
 
@@ -1730,6 +1728,7 @@ NtInitializeRegistry(IN USHORT Flag)
     /* Make sure we're only called once */
     if (!CmFirstTime) return STATUS_ACCESS_DENIED;
     CmFirstTime = FALSE;
+    Ki386PerfEnd();
 
     /* Lock the registry exclusively */
     CmpLockRegistryExclusive();
@@ -1849,7 +1848,7 @@ NtNotifyChangeMultipleKeys(IN HANDLE MasterKeyHandle,
 
     if (Count > 1 || (Count && !SlaveObjects))
         return STATUS_INVALID_PARAMETER;
-    if (ApcRoutine && (PreviousMode == KernelMode || !Asynchronous))
+    if (ApcRoutine && !Asynchronous)
         return STATUS_NOT_IMPLEMENTED;
     if (Asynchronous && !Event && !ApcRoutine) return STATUS_INVALID_PARAMETER;
 

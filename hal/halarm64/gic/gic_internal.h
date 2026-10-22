@@ -63,7 +63,8 @@
 #define GICD_SGIR           0xF00
 #define GICD_CPENDSGIR      0xF10
 #define GICD_SPENDSGIR      0xF20
-#define GICD_PIDR2          0xFE8
+#define GICD_ICPIDR2        0xFE8
+#define GICD_PIDR2          0xFFE8
 #define GICD_IROUTER        0x6100
 
 /*
@@ -906,10 +907,10 @@ HalpReadCntfrq(VOID)
 
 FORCEINLINE
 ULONGLONG
-HalpReadCntpct(VOID)
+HalpReadCntvct(VOID)
 {
     ULONGLONG v;
-    __asm__ __volatile__("mrs %0, cntpct_el0" : "=r"(v));
+    __asm__ __volatile__("mrs %0, cntvct_el0" : "=r"(v));
     return v;
 }
 

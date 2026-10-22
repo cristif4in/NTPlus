@@ -382,6 +382,23 @@ HRESULT rpc_revoke_local_server(unsigned int cookie)
     RPCSS_CALL_END
 }
 
+#ifdef __REACTOS__
+static LONG CALLBACK server_invoke_filter(EXCEPTION_POINTERS *eptr)
+{
+    ULONG_PTR mode = get_global_option(COMGLB_EXCEPTION_HANDLING);
+    DWORD code = eptr->ExceptionRecord->ExceptionCode;
+
+    if (mode == COMGLB_EXCEPTION_DONOT_HANDLE_ANY ||
+        (mode == COMGLB_EXCEPTION_DONOT_HANDLE_FATAL && (code & 0xC0000000) == 0xC0000000))
+    {
+        if (UnhandledExceptionFilter(eptr) == EXCEPTION_CONTINUE_EXECUTION)
+            return EXCEPTION_CONTINUE_EXECUTION;
+        TerminateProcess(GetCurrentProcess(), code);
+    }
+    return EXCEPTION_CONTINUE_SEARCH;
+}
+
+#endif
 static HRESULT rpcss_get_class_object(REFCLSID rclsid, PMInterfacePointer *objref)
 {
     RPCSS_CALL_START
@@ -657,7 +674,7 @@ HRESULT rpc_get_local_class_object(REFCLSID rclsid, REFIID riid, void **obj)
     while (tries++ < MAXTRIES)
     {
         DWORD index, start_ticks;
-        HANDLE process = 0;
+        HANDLE process = 0, wait_handle;
 
         if (SUCCEEDED(hr = rpcss_get_class_object(rclsid, &objref)))
             break;
@@ -670,10 +687,11 @@ HRESULT rpc_get_local_class_object(REFCLSID rclsid, REFIID riid, void **obj)
         }
 
         /* Wait for one second, even if messages arrive. */
+        wait_handle = process ? process : CreateEventW(NULL, TRUE, FALSE, NULL);
         start_ticks = GetTickCount();
         do
         {
-            if (SUCCEEDED(CoWaitForMultipleHandles(0, 1000, (process != 0), &process, &index)) && process && !index)
+            if (SUCCEEDED(CoWaitForMultipleHandles(0, 1000, (wait_handle != 0), &wait_handle, &index)) && process && !index)
             {
                 WARN("Server for %s failed to start.\n", debugstr_guid(rclsid));
                 CloseHandle(process);
@@ -681,7 +699,7 @@ HRESULT rpc_get_local_class_object(REFCLSID rclsid, REFIID riid, void **obj)
             }
         } while (GetTickCount() - start_ticks < 1000);
 
-        if (process) CloseHandle(process);
+        if (wait_handle) CloseHandle(wait_handle);
     }
 
     if (!objref || tries >= MAXTRIES)
@@ -2105,7 +2123,19 @@ void rpc_execute_call(struct dispatch_params *params)
     old_causality_id = tlsdata->causality_id;
     tlsdata->causality_id = orpcthis.cid;
     tlsdata->pending_call_count_server++;
+#ifdef __REACTOS__
+    __TRY
+    {
+        params->hr = IRpcStubBuffer_Invoke(params->stub, params->msg, params->chan);
+    }
+    __EXCEPT(server_invoke_filter)
+    {
+        params->hr = RPC_E_SERVERFAULT;
+    }
+    __ENDTRY
+#else
     params->hr = IRpcStubBuffer_Invoke(params->stub, params->msg, params->chan);
+#endif
     tlsdata->pending_call_count_server--;
     tlsdata->causality_id = old_causality_id;
 

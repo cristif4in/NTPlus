@@ -60,6 +60,9 @@
 WINE_DEFAULT_DEBUG_CHANNEL(explorernew);
 
 HIMAGELIST CreateStartOrbImageList(INT Size);
+HBITMAP CreateStartOrbBitmap(INT Size, UINT ResourceId);
+INT GetStartOrbExtent(HBITMAP Bitmap);
+BOOL DrawStartOrbBitmap(HDC hdc, HBITMAP Source, INT x, INT y, INT Size, double Scale);
 
 static inline INT
 ShellScaleForDpi(INT Value)
@@ -248,6 +251,7 @@ HRESULT WINAPI _CBandSite_CreateInstance(LPUNKNOWN pUnkOuter, REFIID riid, void 
 #define TWM_SHOWNETWORKFLYOUT (WM_USER + 271)
 #define TWM_SHOWCALENDARFLYOUT (WM_USER + 272)
 #define TWM_SHOWPOWERFLYOUT (WM_USER + 273)
+#define TWM_SHOWBLUETOOTHFLYOUT (WM_USER + 274)
 #define TWM_SETTINGSCHANGED (WM_USER + 300)
 #define TWM_SETZORDER (WM_USER + 338)
 
@@ -511,13 +515,11 @@ static inline BOOL GetHideClock()
 #define NTNWM_REALIGN   (0x1)
 #define NTNWM_ICONSCHANGED (0x2)
 
-#define TRAYICON_APP     0
-#define TRAYICON_NETWORK 1
-#define TRAYICON_VOLUME  2
-#define TRAYICON_POWER   3
-
-#define TRAYICONS_QUICKSETTINGS 0
-#define TRAYICONS_OVERFLOW      1
+#define TRAYICON_APP       0
+#define TRAYICON_NETWORK   1
+#define TRAYICON_VOLUME    2
+#define TRAYICON_POWER     3
+#define TRAYICON_BLUETOOTH 4
 
 typedef struct _TRAYICONITEM
 {

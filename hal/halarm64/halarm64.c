@@ -2219,6 +2219,7 @@ static volatile UCHAR HalpArm64DeferredCount[MAXIMUM_PROCESSORS];
 typedef struct _HALP_ARM64_INTERRUPT_STATE
 {
     BOOLEAN Enabled;
+    BOOLEAN EdgeTriggered;
     ULONG Deferred;
 } HALP_ARM64_INTERRUPT_STATE, *PHALP_ARM64_INTERRUPT_STATE;
 
@@ -2264,7 +2265,7 @@ static ULONG HalpArm64DroppedLpiCount[MAXIMUM_PROCESSORS];
 static BOOLEAN HalpArm64LpiFlushing[MAXIMUM_PROCESSORS];
 
 static
-VOID
+BOOLEAN
 HalpArm64DeferInterrupt(
     _In_ ULONG Cpu,
     _In_ ULONG IntId,
@@ -2273,12 +2274,13 @@ HalpArm64DeferInterrupt(
     ULONG Slot;
     ULONG64 Daif = HalpArm64LockInterruptState();
     PHALP_ARM64_INTERRUPT_STATE State = HalpArm64GetInterruptState(Cpu, IntId);
+    BOOLEAN EdgeTriggered = State->EdgeTriggered;
 
     if (!State->Enabled)
     {
         HalpGicDisableInterrupt(IntId);
         HalpArm64UnlockInterruptState(Daif);
-        return;
+        return EdgeTriggered;
     }
 
     for (Slot = 0; Slot < HAL_ARM64_DEFERRED_INT_SLOTS; Slot++)
@@ -2286,7 +2288,7 @@ HalpArm64DeferInterrupt(
         if (HalpArm64DeferredIntId[Cpu][Slot] == (IntId + 1))
         {
             HalpArm64UnlockInterruptState(Daif);
-            return;
+            return EdgeTriggered;
         }
     }
 
@@ -2300,7 +2302,7 @@ HalpArm64DeferInterrupt(
             State->Deferred++;
             HalpGicDisableInterrupt(IntId);
             HalpArm64UnlockInterruptState(Daif);
-            return;
+            return EdgeTriggered;
         }
     }
 
@@ -2310,6 +2312,7 @@ HalpArm64DeferInterrupt(
             Cpu,
             IntId,
             Irql);
+    return EdgeTriggered;
 }
 
 static
@@ -3436,8 +3439,8 @@ HalBeginSystemInterrupt(
             }
             else if ((intid < 1020) && (cpu < MAXIMUM_PROCESSORS))
             {
-                HalpArm64DeferInterrupt(cpu, intid, Irql);
-                HalpArm64RependInterrupt(intid);
+                if (HalpArm64DeferInterrupt(cpu, intid, Irql))
+                    HalpArm64RependInterrupt(intid);
             }
             else if ((intid >= HAL_ARM64_LPI_BASE) && HalpGicItsEnabled && (cpu < MAXIMUM_PROCESSORS))
             {
@@ -3684,6 +3687,7 @@ HalEnableSystemInterrupt(
     Daif = HalpArm64LockInterruptState();
     State = HalpArm64GetInterruptState(KeGetCurrentProcessorNumber(), Vector);
     State->Enabled = TRUE;
+    State->EdgeTriggered = EdgeTriggered;
     HalpArm64ProgramGicTrigger(Vector, EdgeTriggered);
     HalpGicSetInterruptPriority(Vector, priority);
     if (State->Deferred == 0)
@@ -6005,6 +6009,9 @@ HalQueryRealTimeClock(
     ULONG Seconds;
     LARGE_INTEGER SystemTime;
 
+    if (NT_SUCCESS(HalpEfiQueryTime(TimeFields)))
+        return TRUE;
+
     if (HalpArm64HasQemuPl031())
     {
         Pl031Va = MmMapIoSpace(Pl031Phys, PAGE_SIZE, MmNonCached);
@@ -6189,7 +6196,9 @@ NTAPI
 HalSetRealTimeClock(
     _In_ PTIME_FIELDS TimeFields)
 {
-    UNREFERENCED_PARAMETER(TimeFields);
+    if (NT_SUCCESS(HalpEfiSetTime(TimeFields)))
+        return TRUE;
+
     UNIMPLEMENTED_STUB();
     return FALSE;
 }
@@ -7092,7 +7101,7 @@ KeQueryPerformanceCounter(
     {
         PerformanceFrequency->QuadPart = (LONGLONG)HalpReadCntfrq();
     }
-    Counter.QuadPart = (LONGLONG)HalpReadCntpct();
+    Counter.QuadPart = (LONGLONG)HalpReadCntvct();
     return Counter;
 }
 
@@ -7102,14 +7111,14 @@ KeStallExecutionProcessor(
     _In_ ULONG MicroSeconds)
 {
     ULONGLONG Frequency = HalpReadCntfrq();
-    ULONGLONG Start = HalpReadCntpct();
+    ULONGLONG Start = HalpReadCntvct();
     ULONGLONG Ticks;
 
     if (Frequency == 0)
         return;
 
     Ticks = (Frequency / 1000000ULL) * (ULONGLONG)MicroSeconds;
-    while ((HalpReadCntpct() - Start) < Ticks)
+    while ((HalpReadCntvct() - Start) < Ticks)
     {
         __asm__ __volatile__("yield");
     }

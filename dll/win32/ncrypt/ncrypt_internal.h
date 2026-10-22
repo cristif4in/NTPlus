@@ -22,6 +22,13 @@ enum algid
 {
     /* symmetric */
     AES,
+#ifdef __REACTOS__
+    RC2,
+    TDES,
+    DES,
+    DESX,
+    TDES_112,
+#endif
     /* asymmetric */
     RSA,
     DSA,
@@ -35,6 +42,9 @@ struct key
     BCRYPT_KEY_HANDLE bcrypt_key;
 #ifdef __REACTOS__
     BOOL finalized;
+    WCHAR *name;
+    DWORD flags;
+    UCHAR iv[16];
 #endif
 };
 
@@ -55,8 +65,15 @@ struct object_property
     void *value;
 };
 
+#ifdef __REACTOS__
+#define NCRYPT_OBJECT_MAGIC 0x4A424F4E
+#endif
+
 struct object
 {
+#ifdef __REACTOS__
+    DWORD magic;
+#endif
     enum object_type type;
     LONG refs;
     DWORD num_properties;

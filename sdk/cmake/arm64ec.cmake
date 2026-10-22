@@ -114,6 +114,7 @@ set(_arm64ec_cmake_args
 if(TARGET mesa_gallium)
     list(APPEND _arm64ec_cmake_args
         -DENABLE_MESA_LLVMPIPE:BOOL=${ENABLE_MESA_LLVMPIPE}
+        -DMESA_LLVMPIPE_FROM_SOURCE:BOOL=${MESA_LLVMPIPE_FROM_SOURCE}
         -DMESA_GALLIUM_FROM_SOURCE:BOOL=ON
         -DMESA_LLVM_ROOT:PATH=${MESA_ARM64EC_LLVM_ROOT}
         -DMESA_LLVM_LICENSE_FILE:FILEPATH=${MESA_ARM64EC_LLVM_LICENSE_FILE}
@@ -137,6 +138,7 @@ function(_fex_add_nested_configure _name _binary_dir _arguments)
         BYPRODUCTS "${_binary_dir}/build.ninja"
         DEPENDS "${_signature_file}"
         COMMENT "Configuring ${_name} nested build"
+        USES_TERMINAL
         VERBATIM)
     add_custom_target(${_name}_configure DEPENDS "${_configure_stamp}")
     add_dependencies(${_name}_configure host-tools)
@@ -182,6 +184,7 @@ add_custom_target(fex_arm64ec_runtime ALL
     ${_arm64ec_validate}
     BYPRODUCTS ${ARM64EC_RUNTIME_VALIDATION_FILES}
     COMMENT "Building ${_arm64ec_target_count} ARM64EC FEX runtime DLLs"
+    USES_TERMINAL
     VERBATIM)
 add_dependencies(fex_arm64ec_runtime fex_arm64ec_configure)
 
